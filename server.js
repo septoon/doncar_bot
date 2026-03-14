@@ -11,6 +11,7 @@ const {
   BOT_TOKEN,
   ADMIN_TELEGRAM_IDS = '',
   ADMIN_CHANEL_ID = '',
+  HELLO_RUBLES = '0',
   GOOGLE_SHEET_ID,
   GOOGLE_SERVICE_ACCOUNT_EMAIL,
   GOOGLE_PRIVATE_KEY,
@@ -29,6 +30,7 @@ const adminIds = ADMIN_TELEGRAM_IDS.split(',')
   .filter(Boolean);
 
 const adminChannelId = safeString(ADMIN_CHANEL_ID).trim();
+const helloRubles = round2(Math.max(0, safeNumber(HELLO_RUBLES)));
 
 const SHEET_CLIENTS = 'clients';
 const SHEET_HISTORY = 'history';
@@ -50,6 +52,7 @@ const STATES = {
   ADMIN_WAITING_CREATE_CLIENT_RENTAL_DECISION: 'admin_waiting_create_client_rental_decision',
   ADMIN_WAITING_NEW_CLIENT_NAME: 'admin_waiting_new_client_name',
   ADMIN_WAITING_ACCRUAL_AMOUNT: 'admin_waiting_accrual_amount',
+  ADMIN_WAITING_ACCRUAL_CAR_BRAND: 'admin_waiting_accrual_car_brand',
   ADMIN_WAITING_ACCRUAL_DATETIME: 'admin_waiting_accrual_datetime',
   ADMIN_WAITING_ACCRUAL_RENTAL_ID: 'admin_waiting_accrual_rental_id',
   ADMIN_WAITING_HISTORY_IDENTIFIER: 'admin_waiting_history_identifier',
@@ -76,6 +79,7 @@ const REQUEST_STATUS = {
 const OPERATION_TYPE = {
   ACCRUAL: 'accrual',
   REDEEM: 'redeem',
+  WELCOME_ACCRUAL: 'welcome_accrual',
   MANUAL_ACCRUAL: 'manual_accrual',
   MANUAL_REDEEM: 'manual_redeem',
 };
@@ -83,15 +87,15 @@ const OPERATION_TYPE = {
 const BUTTONS = {
   MY_CARD: '💳 Моя карта',
   MY_BALANCE: '💰 Мой баланс',
-  BONUS_HISTORY: '📜 История бонусов',
+  BONUS_HISTORY: '📜 История рублей',
   RENTAL_HISTORY: '🚘 История аренд',
   PROFILE: '👤 Профиль',
   FAQ: '❓ FAQ',
   CLIENT_QR_ID: '🆔 QR/ID',
-  USE_BONUSES: '🎁 Использовать бонусы',
+  USE_BONUSES: '💸 Использовать рубли',
   CONTACT_MANAGER: '📞 Связаться с менеджером',
   MANAGER_TOPIC_RENTAL: '🚘 Тема: аренда',
-  MANAGER_TOPIC_BONUSES: '🎁 Тема: бонусы',
+  MANAGER_TOPIC_BONUSES: '💸 Тема: рубли',
   MANAGER_CALLBACK: '📲 Заказать звонок',
   ADD_CLIENT: '➕ Добавить клиента',
   CONFIRM_ADD_RENTAL: '✅ Добавить аренду',
@@ -102,7 +106,7 @@ const BUTTONS = {
   CLIENT_LIST: '📋 Список клиентов',
   CLIENT_BALANCE: '💰 Баланс клиента',
   CLIENT_HISTORY: '📜 История клиента',
-  ACCRUE_BONUSES: '✨ Начислить бонусы',
+  ACCRUE_BONUSES: '✨ Начислить рубли',
   MANUAL_ACCRUAL: '➕ Начислить вручную',
   MANUAL_REDEEM: '➖ Списать вручную',
   REDEEM_REQUESTS: '📝 Заявки на списание',
@@ -271,6 +275,7 @@ async function initSheets() {
     'rental_datetime',
     'admin_id',
     'telegram_id',
+    'car_brand',
   ]);
 }
 
@@ -340,6 +345,10 @@ function safeJsonParse(value, fallback = {}) {
 
 function round2(n) {
   return Math.round(safeNumber(n) * 100) / 100;
+}
+
+function formatRubles(value) {
+  return `${round2(value)} ₽`;
 }
 
 function pad2(n) {
@@ -427,13 +436,16 @@ function normalizeDateTime(value) {
   let day;
   let month;
   let year;
+  let hasTime = false;
   let hours = '00';
   let minutes = '00';
 
   if (dotMatch) {
     [, day, month, year, hours = '00', minutes = '00'] = dotMatch;
+    hasTime = Boolean(dotMatch[4] && dotMatch[5]);
   } else if (isoMatch) {
     [, year, month, day, hours = '00', minutes = '00'] = isoMatch;
+    hasTime = Boolean(isoMatch[4] && isoMatch[5]);
   } else {
     return null;
   }
@@ -457,11 +469,14 @@ function normalizeDateTime(value) {
     return null;
   }
 
-  return `${pad2(day)}.${pad2(month)}.${year} ${pad2(hours)}:${pad2(minutes)}`;
+  const normalizedDate = `${pad2(day)}.${pad2(month)}.${year}`;
+  if (!hasTime) return normalizedDate;
+
+  return `${normalizedDate} ${pad2(hours)}:${pad2(minutes)}`;
 }
 
 function formatDatePrompt() {
-  return 'Пример: 13.03.2026 18:30';
+  return 'Пример: 13.03.2026';
 }
 
 const TEXT = {
@@ -476,30 +491,31 @@ const TEXT = {
   CLIENT_NOT_FOUND_REGISTER: 'Клиент не найден. Пройдите /start заново.',
   COMMENT_REQUIRED: 'Комментарий не должен быть пустым.',
   CONTACT_NOT_REQUESTED: 'Сейчас номер телефона не запрашивался.',
-  DATE_PROMPT: `Введите дату и время аренды\n${formatDatePrompt()}`,
+  DATE_PROMPT: `Введите дату аренды\n${formatDatePrompt()}`,
   DUPLICATE_ACCRUAL: 'Похоже, это дубль начисления. Операция отменена.',
   DUPLICATE_MANUAL_OPERATION: 'Похоже, такая операция уже есть. Проверьте сумму и комментарий.',
   DUPLICATE_REDEEM: 'Похоже, это дубль списания. Подтверждение остановлено.',
   INVALID_AMOUNT: 'Введите корректную сумму.',
+  INVALID_CAR_BRAND: 'Введите марку автомобиля.',
   INVALID_NAME: 'Введите корректное имя.',
   INVALID_PHONE: 'Не удалось распознать номер телефона.',
   INVALID_RENTAL_AMOUNT: 'Введите корректную сумму аренды.',
   CREATE_CLIENT_WAIT_NAME: 'Введите имя клиента.',
   CREATE_CLIENT_WAIT_PHONE: 'Введите номер телефона клиента.',
   CREATE_CLIENT_EXISTS: 'Клиент с таким номером уже есть в базе.',
-  CREATE_CLIENT_RENTAL_DECISION: 'Добавить клиенту аренду сейчас?\nЕсли это прошлая аренда, укажите её сумму и дату, и бонусы начислятся сразу.',
+  CREATE_CLIENT_RENTAL_DECISION: 'Добавить клиенту аренду сейчас?\nЕсли это прошлая аренда, укажите её сумму, авто и дату, и рубли начислятся сразу.',
   CLIENTS_LIST_EMPTY: 'Клиентов пока нет.',
   MANAGER_MENU: 'Выберите тему обращения или закажите обратный звонок.',
   NO_HISTORY: 'Операций пока нет.',
   NO_RENTALS: 'Аренд пока нет.',
   NO_PENDING_REQUESTS: 'Нет заявок на списание.',
-  NOT_ENOUGH_BONUSES: 'Недостаточно бонусов для списания.\nВведите другую сумму.',
+  NOT_ENOUGH_BONUSES: 'Недостаточно рублей для списания.\nВведите другую сумму.',
   REGISTER_COMPLETE: 'Регистрация завершена.',
   REGISTER_FIRST: 'Сначала зарегистрируйтесь через /start',
-  REDEEM_BY_ADMIN_ONLY: 'Списание бонусов выполняет администратор. Свяжитесь с менеджером.',
+  REDEEM_BY_ADMIN_ONLY: 'Списание рублей выполняет администратор после подтверждения запроса.',
   REQUEST_ALREADY_PROCESSED_PREFIX: 'Заявка уже обработана. Статус:',
   REQUEST_NOT_FOUND: 'Заявка не найдена.',
-  REQUEST_REJECTED_CLIENT: 'Ваш запрос на списание бонусов был отклонён менеджером.',
+  REQUEST_REJECTED_CLIENT: 'Ваш запрос на списание рублей был отклонён менеджером.',
   SAME_REQUEST_EXISTS: 'Похожая заявка уже существует. Проверьте, не отправляли ли вы её ранее.',
   SEND_CONTACT_PROMPT: 'Теперь нажмите кнопку ниже, чтобы отправить ваш номер телефона.',
   SEND_OWN_CONTACT: 'Нужно отправить именно свой контакт.',
@@ -507,7 +523,8 @@ const TEXT = {
   UNKNOWN_COMMAND: 'Не понял команду. Нажмите /start',
   WAIT_COMMENT: 'Введите комментарий.',
   WAIT_IDENTIFIER: 'Введите номер телефона клиента',
-  WAIT_MANUAL_ACCRUAL_AMOUNT: 'Введите сумму бонусов.',
+  WAIT_CAR_BRAND: 'Введите марку автомобиля.',
+  WAIT_MANUAL_ACCRUAL_AMOUNT: 'Введите сумму рублей.',
   WAIT_MANUAL_REDEEM_AMOUNT: 'Введите сумму списания.',
   WAIT_NEW_CLIENT_NAME: 'Клиент не найден. Введите имя клиента.',
   WAIT_PHONE_CONTACT: 'Для регистрации нажмите кнопку ниже и отправьте ваш номер телефона.',
@@ -531,6 +548,8 @@ function formatHistoryLine(item) {
       ? 'Начисление'
       : item.type === OPERATION_TYPE.REDEEM
       ? 'Списание'
+      : item.type === OPERATION_TYPE.WELCOME_ACCRUAL
+      ? 'Приветственное начисление'
       : item.type === OPERATION_TYPE.MANUAL_ACCRUAL
       ? 'Ручное начисление'
       : item.type === OPERATION_TYPE.MANUAL_REDEEM
@@ -540,7 +559,7 @@ function formatHistoryLine(item) {
   const comment = item.comment ? ` — ${item.comment}` : '';
   const date = formatDateTimeValue(item.rental_datetime || item.date || '');
 
-  return `${date} • ${typeLabel} • ${item.amount} бонусов${comment}`;
+  return `${date} • ${typeLabel} • ${formatRubles(item.amount)}${comment}`;
 }
 
 function formatClientCard(client) {
@@ -548,7 +567,7 @@ function formatClientCard(client) {
     `Имя: ${client.name || '-'}\n` +
     `Телефон: ${formatPhoneDisplay(client.phone)}\n` +
     `Telegram ID: ${client.telegram_id || '-'}\n` +
-    `Баланс: ${round2(client.bonus_balance)} бонусов`
+    `Баланс: ${formatRubles(client.bonus_balance)}`
   );
 }
 
@@ -559,7 +578,7 @@ function formatProfileMessage(client) {
     `Имя: ${client.name || '-'}\n` +
     `Телефон: ${formatPhoneDisplay(client.phone)}\n` +
     `Дата регистрации: ${createdAt}\n` +
-    `Баланс: ${round2(client.bonus_balance)} бонусов`
+    `Баланс: ${formatRubles(client.bonus_balance)}`
   );
 }
 
@@ -568,16 +587,21 @@ function formatClientHistory(history) {
 }
 
 function formatRequestCard(request, client) {
-  return [
+  const lines = [
     `request_id: ${request.request_id}`,
     `Имя клиента: ${client?.name || '-'}`,
     `Телефон: ${formatPhoneDisplay(request.phone || client?.phone)}`,
     `Telegram ID: ${request.telegram_id}`,
-    `Аренда: ${request.rental_amount} ₽`,
-    `Дата/время аренды: ${request.rental_datetime}`,
-    `Доступно к списанию: ${request.requested_bonus}`,
+    `Аренда: ${formatRubles(request.rental_amount)}`,
+    `К списанию: ${formatRubles(request.requested_bonus)}`,
     `Статус: ${request.status || REQUEST_STATUS.PENDING}`,
-  ].join('\n');
+  ];
+
+  if (request.rental_datetime) {
+    lines.splice(5, 0, `Дата аренды: ${request.rental_datetime}`);
+  }
+
+  return lines.join('\n');
 }
 
 function formatBalanceMessage(client) {
@@ -585,11 +609,11 @@ function formatBalanceMessage(client) {
 }
 
 function formatAccrualMessage(bonus, balance) {
-  return `Начислено ${bonus} бонусов\nНовый баланс клиента: ${balance}`;
+  return `Начислено ${formatRubles(bonus)}\nНовый баланс клиента: ${formatRubles(balance)}`;
 }
 
 function formatRedeemMessage(amount, balance) {
-  return `Списано ${amount} бонусов\nНовый баланс клиента: ${balance}`;
+  return `Списано ${formatRubles(amount)}\nНовый баланс клиента: ${formatRubles(balance)}`;
 }
 
 function formatClientSummaryMessage(client, history) {
@@ -601,11 +625,12 @@ function formatFoundClientMessage(client) {
 }
 
 function formatClientListLine(client, index) {
-  return `${index}. ${client.name || 'Без имени'} — ${formatPhoneDisplay(client.phone)} — ${round2(client.bonus_balance)} бонусов`;
+  return `${index}. ${client.name || 'Без имени'} — ${formatPhoneDisplay(client.phone)} — ${formatRubles(client.bonus_balance)}`;
 }
 
 function formatRentalHistoryLine(rental) {
-  return `${formatDateTimeValue(rental.rental_datetime || rental.created_at)} • ${rental.rental_amount} ₽ • +${rental.bonus_amount} бонусов`;
+  const carBrand = rental.car_brand ? ` • ${rental.car_brand}` : '';
+  return `${formatDateTimeValue(rental.rental_datetime || rental.created_at)}${carBrand} • ${formatRubles(rental.rental_amount)} • +${formatRubles(rental.bonus_amount)}`;
 }
 
 function formatRentalsHistory(rentals) {
@@ -614,13 +639,13 @@ function formatRentalsHistory(rentals) {
 
 function formatFaqMessage() {
   return [
-    'FAQ по бонусной программе',
+    'FAQ по начислениям',
     '',
-    '1. За каждую завершённую аренду начисляется 5% от суммы аренды.',
+    '1. За каждую завершённую аренду на счёт клиента начисляется 5% от суммы аренды.',
     '2. Списать можно максимум 10% от суммы будущей аренды.',
-    '3. Начисление и списание бонусов выполняет администратор.',
-    '4. Все изменения баланса отображаются в истории бонусов.',
-    '5. Если нужен расчёт или помощь по бонусам, используйте связь с менеджером.',
+    '3. Начисление и списание рублей выполняет администратор.',
+    '4. Все изменения баланса отображаются в истории рублей.',
+    '5. Если нужен расчёт или помощь по списанию, используйте связь с менеджером.',
   ].join('\n');
 }
 
@@ -634,24 +659,24 @@ function formatRequestProcessedMessage(status) {
 
 function formatAdminRentalCalculation(amount, client, maxAllowed, requested) {
   return (
-    `Сумма аренды: ${amount} ₽\n` +
-    `Ваш баланс: ${round2(client.bonus_balance)} бонусов\n` +
-    `Максимум по правилу 10%: ${maxAllowed}\n` +
-    `Доступно к списанию: ${requested}\n\n` +
+    `Сумма аренды: ${formatRubles(amount)}\n` +
+    `Ваш баланс: ${formatRubles(client.bonus_balance)}\n` +
+    `Максимум по правилу 10%: ${formatRubles(maxAllowed)}\n` +
+    `Доступно к списанию: ${formatRubles(requested)}\n\n` +
     TEXT.DATE_PROMPT
   );
 }
 
 function formatNoRedeemAvailableMessage(client) {
-  return `Ваш баланс: ${round2(client.bonus_balance)} бонусов.\nДля этой аренды списание недоступно.`;
+  return `Ваш баланс: ${formatRubles(client.bonus_balance)}.\nДля этой аренды списание недоступно.`;
 }
 
 function formatRequestCreatedMessage(requestId, requestedBonus) {
   return (
     `Заявка создана.\n` +
     `request_id: ${requestId}\n` +
-    `К списанию запрошено: ${requestedBonus} бонусов\n` +
-    `Ожидайте подтверждения менеджера.`
+    `К списанию запрошено: ${formatRubles(requestedBonus)}\n` +
+    `Запрос отправлен менеджеру.`
   );
 }
 
@@ -752,9 +777,9 @@ function normalizeDuplicateKeyValue(duplicateKey) {
 function dateTimeToTimestamp(value) {
   const normalized = normalizeDateTime(value);
   if (normalized) {
-    const match = normalized.match(/^(\d{2})\.(\d{2})\.(\d{4}) (\d{2}):(\d{2})$/);
+    const match = normalized.match(/^(\d{2})\.(\d{2})\.(\d{4})(?: (\d{2}):(\d{2}))?$/);
     if (match) {
-      const [, day, month, year, hours, minutes] = match;
+      const [, day, month, year, hours = '00', minutes = '00'] = match;
       return new Date(
         safeNumber(year),
         safeNumber(month) - 1,
@@ -855,6 +880,7 @@ function mapRentalRow(row, rowNumber) {
     rental_datetime: row[6] || '',
     admin_id: row[7] || '',
     telegram_id: safeString(row[8]),
+    car_brand: row[9] || '',
   };
 }
 
@@ -1012,7 +1038,33 @@ async function addRentalEntry(entry) {
     entry.rental_datetime || '',
     entry.admin_id || '',
     entry.telegram_id || '',
+    entry.car_brand || '',
   ]);
+}
+
+async function applyWelcomeRubles(client) {
+  if (!client || helloRubles <= 0) return client;
+
+  const nextBalance = await changeBonusBalanceByPhone(client.phone, helloRubles);
+  await addHistory({
+    operation_id: buildOperationId(OPERATION_TYPE.WELCOME_ACCRUAL),
+    telegram_id: client.telegram_id,
+    type: OPERATION_TYPE.WELCOME_ACCRUAL,
+    amount: helloRubles,
+    comment: 'Приветственные рубли',
+    admin_id: 'system',
+    rental_datetime: currentDisplayDateTime(),
+    duplicate_key: '',
+    phone: client.phone,
+  });
+
+  logEvent('WELCOME_ACCRUAL', {
+    telegramId: client.telegram_id,
+    amount: helloRubles,
+    balance: nextBalance,
+  });
+
+  return await getClientByPhone(client.phone);
 }
 
 async function historyDuplicateKeyExists(duplicateKey) {
@@ -1126,6 +1178,24 @@ async function markRequestStatus(requestId, status, adminId) {
   await updateRowCells(SHEET_REQUESTS, req.rowNumber, 'H', [status, adminId || '']);
 }
 
+async function markPendingRequestByPhoneAndAmount(phone, requestedAmount, status, adminId) {
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) return null;
+
+  const rows = await getAllRows(SHEET_REQUESTS);
+
+  for (let i = rows.length - 1; i >= 1; i--) {
+    if (safeString(rows[i][7]) !== REQUEST_STATUS.PENDING) continue;
+    if (normalizePhone(rows[i][3]) !== normalizedPhone) continue;
+    if (round2(rows[i][6]) !== round2(requestedAmount)) continue;
+
+    await updateRowCells(SHEET_REQUESTS, i + 1, 'H', [status, adminId || '']);
+    return mapRequestRow(rows[i], i + 1);
+  }
+
+  return null;
+}
+
 async function requestLooksDuplicate(phone, rentalDateTime) {
   const rows = await getAllRows(SHEET_REQUESTS);
   for (let i = 1; i < rows.length; i++) {
@@ -1210,8 +1280,8 @@ function clientKeyboard() {
     keyboard: [
       [{ text: BUTTONS.MY_BALANCE }, { text: BUTTONS.PROFILE }],
       [{ text: BUTTONS.BONUS_HISTORY }, { text: BUTTONS.RENTAL_HISTORY }],
-      [{ text: BUTTONS.CLIENT_QR_ID }, { text: BUTTONS.FAQ }],
-      [{ text: BUTTONS.CONTACT_MANAGER }],
+      [{ text: BUTTONS.CLIENT_QR_ID }, { text: BUTTONS.USE_BONUSES }],
+      [{ text: BUTTONS.FAQ }, { text: BUTTONS.CONTACT_MANAGER }],
     ],
     resize_keyboard: true,
   };
@@ -1301,6 +1371,17 @@ async function notifyManagersAboutClientTopic(client, topic, isCallbackRequest =
   return sendMessage(adminChannelId, text);
 }
 
+async function notifyChannelAboutRedeemRequest(request, client) {
+  if (!adminChannelId) return null;
+
+  const text = [
+    'Новая заявка на списание рублей',
+    formatRequestCard(request, client),
+  ].join('\n\n');
+
+  return sendMessage(adminChannelId, text);
+}
+
 async function notifyAdminsAboutRequest(requestId) {
   const request = await getRequestById(requestId);
   if (!request) return;
@@ -1348,7 +1429,7 @@ async function handleStart(chatId, telegramId) {
     await clearState(telegramId);
     return sendMessage(
       chatId,
-      `Добро пожаловать в Doncar Club.\nВаш баланс: ${round2(client.bonus_balance)} бонусов`,
+      `Добро пожаловать в Doncar Club.\nВаш баланс: ${formatRubles(client.bonus_balance)}`,
       clientKeyboard()
     );
   }
@@ -1373,12 +1454,30 @@ async function handleContact(chatId, telegramId, contact, fromUser) {
     return sendMessage(chatId, TEXT.INVALID_PHONE);
   }
 
-  const client = await upsertClient(telegramId, getTelegramDisplayName(fromUser), phone);
+  const existingByPhone = await getClientByPhone(phone);
+  const existingByTelegram = await getClientByTelegramId(telegramId);
+  const isNewClient = !existingByPhone && !existingByTelegram;
+
+  let client = await upsertClient(telegramId, getTelegramDisplayName(fromUser), phone);
+  if (isNewClient && helloRubles > 0) {
+    client = await applyWelcomeRubles(client);
+  }
+
   await clearState(telegramId);
+
+  const lines = [
+    TEXT.REGISTER_COMPLETE,
+  ];
+
+  if (isNewClient && helloRubles > 0) {
+    lines.push(`Поздравляем! Вам начислено ${formatRubles(helloRubles)}.`);
+  }
+
+  lines.push(`Ваш баланс: ${formatRubles(client?.bonus_balance)}`);
 
   return sendMessage(
     chatId,
-    `${TEXT.REGISTER_COMPLETE}\nВаш баланс: ${round2(client?.bonus_balance)} бонусов`,
+    lines.join('\n'),
     clientKeyboard()
   );
 }
@@ -1391,7 +1490,7 @@ async function handleMyBalance(chatId, telegramId) {
   const client = await getClientByTelegramId(telegramId);
   if (!client) return sendMessage(chatId, TEXT.REGISTER_FIRST);
 
-  return sendMessage(chatId, `Ваш баланс: ${round2(client.bonus_balance)} бонусов`, clientKeyboard());
+  return sendMessage(chatId, `Ваш баланс: ${formatRubles(client.bonus_balance)}`, clientKeyboard());
 }
 
 async function handleBonusHistory(chatId, telegramId) {
@@ -1399,7 +1498,7 @@ async function handleBonusHistory(chatId, telegramId) {
   if (!client) return sendMessage(chatId, TEXT.REGISTER_FIRST);
 
   const history = await getClientHistory(client, 15);
-  return sendMessage(chatId, `История бонусов\n\n${formatClientHistory(history)}`, clientKeyboard());
+  return sendMessage(chatId, `История рублей\n\n${formatClientHistory(history)}`, clientKeyboard());
 }
 
 async function handleRentalHistory(chatId, telegramId) {
@@ -1480,8 +1579,15 @@ async function handleManagerTopic(chatId, telegramId, topic, isCallbackRequest =
 }
 
 async function handleUseBonuses(chatId, telegramId) {
-  await clearState(telegramId);
-  return sendMessage(chatId, TEXT.REDEEM_BY_ADMIN_ONLY, clientKeyboard());
+  const client = await getClientByTelegramId(telegramId);
+  if (!client) return sendMessage(chatId, TEXT.REGISTER_FIRST);
+
+  if (!adminChannelId) {
+    return sendMessage(chatId, 'Канал уведомлений пока не настроен. Попробуйте позже.', clientKeyboard());
+  }
+
+  await setState(telegramId, STATES.CLIENT_WAITING_RENTAL_AMOUNT_FOR_REDEEM, {});
+  return sendMessage(chatId, 'Введите сумму аренды, для которой хотите использовать рубли.');
 }
 
 async function sendPendingRequests(chatId) {
@@ -1617,7 +1723,7 @@ async function approveRequest(chatId, adminTelegramId, requestId) {
   await sendMessage(chatId, `Списание подтверждено.\n${formatRedeemMessage(allowed, nextBalance)}`);
   return sendMessageIfPossible(
     client.telegram_id,
-    `Ваш запрос подтверждён.\nСписано: ${allowed} бонусов\nТекущий баланс: ${nextBalance}`,
+    `Ваш запрос подтверждён.\nСписано: ${formatRubles(allowed)}\nТекущий баланс: ${formatRubles(nextBalance)}`,
     clientKeyboard()
   );
 }
@@ -1824,8 +1930,45 @@ async function handleWaitingPhoneContactState(context) {
 }
 
 async function handleClientWaitingRentalAmountState(context) {
+  const amount = parseMoney(context.text);
+  if (!amount || amount <= 0) return sendMessage(context.chatId, TEXT.INVALID_RENTAL_AMOUNT);
+
+  const client = await getClientByTelegramId(context.telegramId);
+  if (!client) {
+    await clearState(context.telegramId);
+    return sendMessage(context.chatId, TEXT.REGISTER_FIRST);
+  }
+
+  const maxAllowed = round2(amount * 0.1);
+  const requested = round2(Math.min(client.bonus_balance, maxAllowed));
+  if (requested <= 0) {
+    await clearState(context.telegramId);
+    return sendMessage(context.chatId, formatNoRedeemAvailableMessage(client), clientKeyboard());
+  }
+
+  const requestId = buildRequestId(context.telegramId);
+  const request = {
+    request_id: requestId,
+    telegram_id: context.telegramId,
+    phone: client.phone,
+    rental_amount: amount,
+    max_allowed_bonus: maxAllowed,
+    requested_bonus: requested,
+    status: REQUEST_STATUS.PENDING,
+    admin_id: '',
+    rental_id: '',
+    rental_datetime: '',
+  };
+
+  await addRequest(request);
+  await notifyChannelAboutRedeemRequest(request, client);
   await clearState(context.telegramId);
-  return sendMessage(context.chatId, TEXT.REDEEM_BY_ADMIN_ONLY, clientKeyboard());
+
+  return sendMessage(
+    context.chatId,
+    `${formatRequestCreatedMessage(requestId, requested)}\nВаш текущий баланс: ${formatRubles(client.bonus_balance)}.`,
+    clientKeyboard()
+  );
 }
 
 async function handleClientWaitingRedeemDatetimeState(context) {
@@ -2041,7 +2184,7 @@ async function handleAdminWaitingManualAccrualCommentState(context) {
 
   await sendMessageIfPossible(
     client.telegram_id,
-    `Вам начислено ${temp.bonus_amount} бонусов.\nТекущий баланс: ${nextBalance} бонусов.`,
+    `Вам начислено ${formatRubles(temp.bonus_amount)}.\nТекущий баланс: ${formatRubles(nextBalance)}.`,
     clientKeyboard()
   );
   return true;
@@ -2110,6 +2253,13 @@ async function handleAdminWaitingManualRedeemCommentState(context) {
     phone: client.phone,
   });
 
+  await markPendingRequestByPhoneAndAmount(
+    client.phone,
+    temp.bonus_amount,
+    REQUEST_STATUS.APPROVED,
+    context.telegramId
+  );
+
   logEvent('MANUAL_REDEEM', {
     telegramId: client.telegram_id,
     adminId: context.telegramId,
@@ -2123,7 +2273,7 @@ async function handleAdminWaitingManualRedeemCommentState(context) {
 
   await sendMessageIfPossible(
     client.telegram_id,
-    `С вашего бонусного баланса списано ${temp.bonus_amount} бонусов.\nТекущий баланс: ${nextBalance} бонусов.`,
+    `С вашего баланса списано ${formatRubles(temp.bonus_amount)}.\nТекущий баланс: ${formatRubles(nextBalance)}.`,
     clientKeyboard()
   );
   return true;
@@ -2135,6 +2285,17 @@ async function handleAdminWaitingAccrualAmountState(context) {
 
   const temp = await parseStateData(context.telegramId);
   temp.rental_amount = amount;
+  await setState(context.telegramId, STATES.ADMIN_WAITING_ACCRUAL_CAR_BRAND, temp);
+
+  return sendMessage(context.chatId, TEXT.WAIT_CAR_BRAND);
+}
+
+async function handleAdminWaitingAccrualCarBrandState(context) {
+  const carBrand = safeString(context.text).trim();
+  if (!carBrand) return sendMessage(context.chatId, TEXT.INVALID_CAR_BRAND);
+
+  const temp = await parseStateData(context.telegramId);
+  temp.car_brand = carBrand;
   await setState(context.telegramId, STATES.ADMIN_WAITING_ACCRUAL_DATETIME, temp);
 
   return sendMessage(context.chatId, TEXT.DATE_PROMPT);
@@ -2160,17 +2321,6 @@ async function handleAdminWaitingAccrualRentalIdState(context) {
     return sendMessage(context.chatId, TEXT.CLIENT_NOT_FOUND_RESTART);
   }
 
-  const duplicateKey = buildDuplicateKey(
-    OPERATION_TYPE.ACCRUAL,
-    client.phone,
-    temp.rental_datetime
-  );
-
-  if (await historyDuplicateKeyExists(duplicateKey)) {
-    await clearState(context.telegramId);
-    return sendMessage(context.chatId, TEXT.DUPLICATE_ACCRUAL);
-  }
-
   const bonus = round2(temp.rental_amount * 0.05);
   const operationId = buildOperationId(OPERATION_TYPE.ACCRUAL);
   const nextBalance = await changeBonusBalanceByPhone(client.phone, bonus);
@@ -2179,10 +2329,10 @@ async function handleAdminWaitingAccrualRentalIdState(context) {
     telegram_id: client.telegram_id,
     type: OPERATION_TYPE.ACCRUAL,
     amount: bonus,
-    comment: `5% от аренды ${temp.rental_amount} ₽`,
+    comment: `5% от аренды ${formatRubles(temp.rental_amount)}${temp.car_brand ? ` • ${temp.car_brand}` : ''}`,
     admin_id: context.telegramId,
     rental_datetime: temp.rental_datetime,
-    duplicate_key: duplicateKey,
+    duplicate_key: '',
     phone: client.phone,
   });
 
@@ -2194,6 +2344,7 @@ async function handleAdminWaitingAccrualRentalIdState(context) {
     rental_datetime: temp.rental_datetime,
     admin_id: context.telegramId,
     telegram_id: client.telegram_id,
+    car_brand: temp.car_brand,
   });
 
   logEvent('ACCRUAL', {
@@ -2209,7 +2360,7 @@ async function handleAdminWaitingAccrualRentalIdState(context) {
 
   await sendMessageIfPossible(
     client.telegram_id,
-    `Вам начислено ${bonus} бонусов.\nТекущий баланс: ${nextBalance} бонусов.`,
+    `Вам начислено ${formatRubles(bonus)}.\nТекущий баланс: ${formatRubles(nextBalance)}.`,
     clientKeyboard()
   );
   return true;
@@ -2230,6 +2381,7 @@ const STATE_HANDLERS = {
   [STATES.ADMIN_WAITING_CREATE_CLIENT_RENTAL_DECISION]: handleAdminWaitingCreateClientRentalDecisionState,
   [STATES.ADMIN_WAITING_NEW_CLIENT_NAME]: handleAdminWaitingNewClientNameState,
   [STATES.ADMIN_WAITING_ACCRUAL_AMOUNT]: handleAdminWaitingAccrualAmountState,
+  [STATES.ADMIN_WAITING_ACCRUAL_CAR_BRAND]: handleAdminWaitingAccrualCarBrandState,
   [STATES.ADMIN_WAITING_ACCRUAL_DATETIME]: handleAdminWaitingAccrualDatetimeState,
   [STATES.ADMIN_WAITING_ACCRUAL_RENTAL_ID]: handleAdminWaitingAccrualRentalIdState,
   [STATES.ADMIN_WAITING_MANUAL_ACCRUAL_IDENTIFIER]: handleAdminWaitingManualAccrualIdentifierState,

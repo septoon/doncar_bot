@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import TelegramBot from 'node-telegram-bot-api';
 import { google } from 'googleapis';
+import QRCode from 'qrcode';
 
 const APP_VERSION = 'v1.0.0';
 
@@ -9,7 +10,6 @@ const APP_VERSION = 'v1.0.0';
 const {
   BOT_TOKEN,
   ADMIN_TELEGRAM_IDS = '',
-  MANAGER_USERNAME = 'septoon',
   GOOGLE_SHEET_ID,
   GOOGLE_SERVICE_ACCOUNT_EMAIL,
   GOOGLE_PRIVATE_KEY,
@@ -31,6 +31,7 @@ const SHEET_CLIENTS = 'clients';
 const SHEET_HISTORY = 'history';
 const SHEET_STATES = 'states';
 const SHEET_REQUESTS = 'requests';
+const SHEET_RENTALS = 'rentals';
 
 const STATES = {
   NONE: '',
@@ -41,6 +42,7 @@ const STATES = {
   CLIENT_WAITING_REDEEM_RENTAL_ID: 'client_waiting_redeem_rental_id',
   ADMIN_CLIENT_ACTIONS: 'admin_client_actions',
   ADMIN_WAITING_CLIENT_IDENTIFIER: 'admin_waiting_client_identifier',
+  ADMIN_WAITING_NEW_CLIENT_NAME: 'admin_waiting_new_client_name',
   ADMIN_WAITING_ACCRUAL_AMOUNT: 'admin_waiting_accrual_amount',
   ADMIN_WAITING_ACCRUAL_DATETIME: 'admin_waiting_accrual_datetime',
   ADMIN_WAITING_ACCRUAL_RENTAL_ID: 'admin_waiting_accrual_rental_id',
@@ -75,10 +77,20 @@ const OPERATION_TYPE = {
 const BUTTONS = {
   MY_CARD: 'Моя карта',
   MY_BALANCE: 'Мой баланс',
+  BONUS_HISTORY: 'История бонусов',
+  RENTAL_HISTORY: 'История аренд',
+  PROFILE: 'Профиль',
+  FAQ: 'FAQ',
+  CLIENT_QR_ID: 'QR/ID',
   USE_BONUSES: 'Использовать бонусы',
   CONTACT_MANAGER: 'Связаться с менеджером',
+  MANAGER_TOPIC_RENTAL: 'Тема: аренда',
+  MANAGER_TOPIC_BONUSES: 'Тема: бонусы',
+  MANAGER_CALLBACK: 'Заказать звонок',
+  BACK: 'Назад',
   ADMIN_MENU: 'Админ-меню',
   FIND_CLIENT: 'Найти клиента',
+  CLIENT_LIST: 'Список клиентов',
   CLIENT_BALANCE: 'Баланс клиента',
   CLIENT_HISTORY: 'История клиента',
   ACCRUE_BONUSES: 'Начислить бонусы',
@@ -98,6 +110,7 @@ const SHEET_CACHE_TTLS = {
   [SHEET_HISTORY]: 5_000,
   [SHEET_REQUESTS]: 5_000,
   [SHEET_STATES]: 3_000,
+  [SHEET_RENTALS]: 5_000,
 };
 
 const sheetCache = {
@@ -105,6 +118,7 @@ const sheetCache = {
   [SHEET_HISTORY]: { data: null, expiresAt: 0 },
   [SHEET_REQUESTS]: { data: null, expiresAt: 0 },
   [SHEET_STATES]: { data: null, expiresAt: 0 },
+  [SHEET_RENTALS]: { data: null, expiresAt: 0 },
 };
 
 const clientIndexesCache = new WeakMap();
@@ -183,6 +197,13 @@ async function ensureSheet(title, headers) {
 
   if (isEmpty) {
     await writeRange(`${title}!A1`, [headers]);
+    return;
+  }
+
+  for (let i = 0; i < headers.length; i++) {
+    if (safeString(row[i]).trim() !== '') continue;
+    const columnLetter = String.fromCharCode(65 + i);
+    await writeRange(`${title}!${columnLetter}1`, [[headers[i]]]);
   }
 }
 
@@ -207,6 +228,7 @@ async function initSheets() {
     'rental_id',
     'rental_datetime',
     'duplicate_key',
+    'phone',
   ]);
 
   await ensureSheet(SHEET_STATES, [
@@ -228,6 +250,18 @@ async function initSheets() {
     'admin_id',
     'rental_id',
     'rental_datetime',
+  ]);
+
+  await ensureSheet(SHEET_RENTALS, [
+    'entry_id',
+    'created_at',
+    'client_name',
+    'phone',
+    'rental_amount',
+    'bonus_amount',
+    'rental_datetime',
+    'admin_id',
+    'telegram_id',
   ]);
 }
 
@@ -362,6 +396,18 @@ function formatPhoneDisplay(phone) {
   return rawPhone;
 }
 
+function getTelegramDisplayName(user) {
+  const firstName = safeString(user?.first_name).trim();
+  const lastName = safeString(user?.last_name).trim();
+  const fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
+  if (fullName) return fullName;
+
+  const username = safeString(user?.username).trim();
+  if (username) return `@${username}`;
+
+  return 'Без имени';
+}
+
 function normalizeDateTime(value) {
   const str = safeString(value).trim();
   if (!str) return null;
@@ -416,7 +462,7 @@ const TEXT = {
   ADMIN_MENU: 'Админ-меню',
   CALLBACK_ACTION_ERROR: 'Произошла ошибка при обработке действия.',
   CLIENT_FOUND: 'Клиент найден',
-  CLIENT_NOT_FOUND: 'Клиент не найден.\nИспользуйте Telegram ID или телефон.',
+  CLIENT_NOT_FOUND: 'Клиент не найден.\nИспользуйте номер телефона.',
   CLIENT_NOT_FOUND_RESTART: 'Клиент не найден. Начните заново.',
   CLIENT_NOT_FOUND_REGISTER: 'Клиент не найден. Пройдите /start заново.',
   COMMENT_REQUIRED: 'Комментарий не должен быть пустым.',
@@ -429,25 +475,29 @@ const TEXT = {
   INVALID_NAME: 'Введите корректное имя.',
   INVALID_PHONE: 'Не удалось распознать номер телефона.',
   INVALID_RENTAL_AMOUNT: 'Введите корректную сумму аренды.',
+  CLIENTS_LIST_EMPTY: 'Клиентов пока нет.',
+  MANAGER_MENU: 'Выберите тему обращения или закажите обратный звонок.',
   NO_HISTORY: 'Операций пока нет.',
+  NO_RENTALS: 'Аренд пока нет.',
   NO_PENDING_REQUESTS: 'Нет заявок на списание.',
   NOT_ENOUGH_BONUSES: 'Недостаточно бонусов для списания.\nВведите другую сумму.',
   REGISTER_COMPLETE: 'Регистрация завершена.',
   REGISTER_FIRST: 'Сначала зарегистрируйтесь через /start',
+  REDEEM_BY_ADMIN_ONLY: 'Списание бонусов выполняет администратор. Свяжитесь с менеджером.',
   REQUEST_ALREADY_PROCESSED_PREFIX: 'Заявка уже обработана. Статус:',
   REQUEST_NOT_FOUND: 'Заявка не найдена.',
   REQUEST_REJECTED_CLIENT: 'Ваш запрос на списание бонусов был отклонён менеджером.',
-  REQUEST_RENTAL_ID_PROMPT: 'Теперь отправьте номер аренды/брони.\nЕсли его нет — отправьте "-".',
-  REQUEST_RENTAL_ID_PROMPT_ADMIN: 'Введите номер аренды/брони. Если его нет — отправьте "-".',
   SAME_REQUEST_EXISTS: 'Похожая заявка уже существует. Проверьте, не отправляли ли вы её ранее.',
   SEND_CONTACT_PROMPT: 'Теперь нажмите кнопку ниже, чтобы отправить ваш номер телефона.',
   SEND_OWN_CONTACT: 'Нужно отправить именно свой контакт.',
   SERVICE_UNAVAILABLE: 'Сервис временно недоступен. Попробуйте позже.',
   UNKNOWN_COMMAND: 'Не понял команду. Нажмите /start',
   WAIT_COMMENT: 'Введите комментарий.',
-  WAIT_IDENTIFIER: 'Введите Telegram ID клиента или его телефон',
+  WAIT_IDENTIFIER: 'Введите номер телефона клиента',
   WAIT_MANUAL_ACCRUAL_AMOUNT: 'Введите сумму бонусов.',
   WAIT_MANUAL_REDEEM_AMOUNT: 'Введите сумму списания.',
+  WAIT_NEW_CLIENT_NAME: 'Клиент не найден. Введите имя клиента.',
+  WAIT_PHONE_CONTACT: 'Для регистрации нажмите кнопку ниже и отправьте ваш номер телефона.',
   WAIT_RENTAL_AMOUNT: 'Введите сумму аренды.',
   ZERO_REDEEM: 'Списывать нечего: баланс пустой или лимит исчерпан.',
 };
@@ -475,17 +525,27 @@ function formatHistoryLine(item) {
       : item.type;
 
   const comment = item.comment ? ` — ${item.comment}` : '';
-  const rental = item.rental_id ? ` — аренда: ${item.rental_id}` : '';
   const date = formatDateTimeValue(item.rental_datetime || item.date || '');
 
-  return `${date} • ${typeLabel} • ${item.amount} бонусов${rental}${comment}`;
+  return `${date} • ${typeLabel} • ${item.amount} бонусов${comment}`;
 }
 
 function formatClientCard(client) {
   return (
     `Имя: ${client.name || '-'}\n` +
     `Телефон: ${formatPhoneDisplay(client.phone)}\n` +
-    `Telegram ID: ${client.telegram_id}\n` +
+    `Telegram ID: ${client.telegram_id || '-'}\n` +
+    `Баланс: ${round2(client.bonus_balance)} бонусов`
+  );
+}
+
+function formatProfileMessage(client) {
+  const createdAt = client.created_at ? formatDateTimeValue(client.created_at) : '-';
+  return (
+    `Профиль Doncar Club\n\n` +
+    `Имя: ${client.name || '-'}\n` +
+    `Телефон: ${formatPhoneDisplay(client.phone)}\n` +
+    `Дата регистрации: ${createdAt}\n` +
     `Баланс: ${round2(client.bonus_balance)} бонусов`
   );
 }
@@ -502,7 +562,6 @@ function formatRequestCard(request, client) {
     `Telegram ID: ${request.telegram_id}`,
     `Аренда: ${request.rental_amount} ₽`,
     `Дата/время аренды: ${request.rental_datetime}`,
-    `Номер аренды: ${request.rental_id || '-'}`,
     `Доступно к списанию: ${request.requested_bonus}`,
     `Статус: ${request.status || REQUEST_STATUS.PENDING}`,
   ].join('\n');
@@ -526,6 +585,30 @@ function formatClientSummaryMessage(client, history) {
 
 function formatFoundClientMessage(client) {
   return `${TEXT.CLIENT_FOUND}\n\n${formatClientCard(client)}`;
+}
+
+function formatClientListLine(client, index) {
+  return `${index}. ${client.name || 'Без имени'} — ${formatPhoneDisplay(client.phone)} — ${round2(client.bonus_balance)} бонусов`;
+}
+
+function formatRentalHistoryLine(rental) {
+  return `${formatDateTimeValue(rental.rental_datetime || rental.created_at)} • ${rental.rental_amount} ₽ • +${rental.bonus_amount} бонусов`;
+}
+
+function formatRentalsHistory(rentals) {
+  return rentals.length ? rentals.map(formatRentalHistoryLine).join('\n') : TEXT.NO_RENTALS;
+}
+
+function formatFaqMessage() {
+  return [
+    'FAQ по бонусной программе',
+    '',
+    '1. За каждую завершённую аренду начисляется 5% от суммы аренды.',
+    '2. Списать можно максимум 10% от суммы будущей аренды.',
+    '3. Начисление и списание бонусов выполняет администратор.',
+    '4. Все изменения баланса отображаются в истории бонусов.',
+    '5. Если нужен расчёт или помощь по бонусам, используйте связь с менеджером.',
+  ].join('\n');
 }
 
 function formatClientPromptMessage(client, prompt) {
@@ -567,39 +650,76 @@ function buildRequestId(telegramId) {
   return `REQ-${telegramId}-${Date.now()}`;
 }
 
+function buildRentalEntryId() {
+  return `RENT-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+}
+
 function buildOperationId(type) {
   return `OP-${type}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 }
 
-function buildDuplicateKey(type, telegramId, rentalAmount, rentalDateTime, rentalId) {
-  if (rentalId) return [type, telegramId, safeString(rentalId)].join('|');
-  return [type, telegramId, safeString(rentalAmount), safeString(rentalDateTime)].join('|');
+function buildDuplicateKey(type, clientKey, rentalDateTime) {
+  return [type, clientKey, safeString(rentalDateTime)].join('|');
 }
 
-function buildManualOperationDuplicateKey(type, telegramId, amount, comment) {
-  return [type, telegramId, safeString(amount), safeString(comment).trim().toLowerCase()].join('|');
+function buildManualOperationDuplicateKey(type, clientKey, amount, comment) {
+  return [type, clientKey, safeString(amount), safeString(comment).trim().toLowerCase()].join('|');
 }
 
-function buildManualAccrualDuplicateKey(telegramId, amount, comment) {
-  return buildManualOperationDuplicateKey('manual_accrual', telegramId, amount, comment);
+function buildManualAccrualDuplicateKey(clientKey, amount, comment) {
+  return buildManualOperationDuplicateKey('manual_accrual', clientKey, amount, comment);
 }
 
-function buildManualRedeemDuplicateKey(telegramId, amount, comment) {
-  return buildManualOperationDuplicateKey('manual_redeem', telegramId, amount, comment);
+function buildManualRedeemDuplicateKey(clientKey, amount, comment) {
+  return buildManualOperationDuplicateKey('manual_redeem', clientKey, amount, comment);
 }
 
 function currentDisplayDateTime() {
   return formatDateTimeValue(nowIso());
 }
 
+function buildClientPublicId(client) {
+  const digits = safeString(client.phone).replace(/\D/g, '');
+  return digits ? `DC-${digits}` : `DC-${safeString(client.telegram_id) || 'UNKNOWN'}`;
+}
+
+function splitTextByLimit(lines, limit = 3500) {
+  const chunks = [];
+  let current = '';
+
+  for (const line of lines) {
+    const next = current ? `${current}\n${line}` : line;
+    if (next.length > limit && current) {
+      chunks.push(current);
+      current = line;
+      continue;
+    }
+
+    current = next;
+  }
+
+  if (current) chunks.push(current);
+  return chunks;
+}
+
 function normalizeDuplicateKeyValue(duplicateKey) {
   const key = safeString(duplicateKey);
   const parts = key.split('|');
+  const isRentalOperation = [OPERATION_TYPE.ACCRUAL, OPERATION_TYPE.REDEEM].includes(parts[0]);
+
+  if (!isRentalOperation) return key;
 
   if (parts.length === 4) {
     const normalizedDateTime = normalizeDateTime(parts[3]);
     if (normalizedDateTime) {
-      return [parts[0], parts[1], parts[2], normalizedDateTime].join('|');
+      return [parts[0], parts[1], normalizedDateTime].join('|');
+    }
+  }
+
+  if (parts.length === 3) {
+    const normalizedDateTime = normalizeDateTime(parts[2]);
+    if (normalizedDateTime) {
+      return [parts[0], parts[1], normalizedDateTime].join('|');
     }
   }
 
@@ -696,6 +816,22 @@ function mapHistoryRow(row, index) {
     rental_id: row[7] || '',
     rental_datetime: row[8] || '',
     duplicate_key: row[9] || '',
+    phone: row[10] || '',
+  };
+}
+
+function mapRentalRow(row, rowNumber) {
+  return {
+    rowNumber,
+    entry_id: row[0] || '',
+    created_at: row[1] || '',
+    client_name: row[2] || '',
+    phone: row[3] || '',
+    rental_amount: safeNumber(row[4]),
+    bonus_amount: safeNumber(row[5]),
+    rental_datetime: row[6] || '',
+    admin_id: row[7] || '',
+    telegram_id: safeString(row[8]),
   };
 }
 
@@ -721,43 +857,108 @@ async function getClientByPhone(phone) {
 }
 
 async function findClientByIdentifier(identifier) {
-  const byId = await getClientByTelegramId(identifier);
-  if (byId) return byId;
   return await getClientByPhone(identifier);
 }
 
-async function upsertClient(telegramId, name, phone) {
-  const normalizedPhone = normalizePhone(phone);
-  const existing = await getClientByTelegramId(telegramId);
-  const now = nowIso();
+async function getClients() {
+  const rows = await getAllRows(SHEET_CLIENTS);
+  const clients = [];
 
-  if (existing) {
-    await updateRowCells(SHEET_CLIENTS, existing.rowNumber, 'B', [
-      name,
-      normalizedPhone,
-      existing.bonus_balance,
-      existing.created_at || now,
-      now,
-    ]);
-    return;
+  for (let i = 1; i < rows.length; i++) {
+    const client = mapClientRow(rows[i], i + 1);
+    if (!client.phone && !client.telegram_id) continue;
+    clients.push(client);
   }
+
+  return clients;
+}
+
+async function saveClient(client) {
+  const normalizedPhone = normalizePhone(client.phone);
+  if (!normalizedPhone) throw new Error(`Invalid client phone: ${client.phone}`);
+
+  const now = nowIso();
+  await updateRowCells(SHEET_CLIENTS, client.rowNumber, 'A', [
+    client.telegram_id || '',
+    client.name || '',
+    normalizedPhone,
+    round2(client.bonus_balance),
+    client.created_at || now,
+    now,
+  ]);
+}
+
+async function createClient({ telegramId = '', name = '', phone, bonusBalance = 0 }) {
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) throw new Error(`Invalid client phone: ${phone}`);
+
+  const now = nowIso();
 
   await appendRow(SHEET_CLIENTS, [
     telegramId,
     name,
     normalizedPhone,
-    0,
+    round2(bonusBalance),
     now,
     now,
   ]);
+
+  return await getClientByPhone(normalizedPhone);
 }
 
-async function changeBonusBalance(telegramId, delta) {
-  const client = await getClientByTelegramId(telegramId);
-  if (!client) throw new Error(`Client not found: ${telegramId}`);
+async function upsertClient(telegramId, name, phone) {
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) throw new Error(`Invalid client phone: ${phone}`);
+
+  const existingByPhone = await getClientByPhone(normalizedPhone);
+  const existingByTelegram = telegramId ? await getClientByTelegramId(telegramId) : null;
+
+  if (existingByPhone) {
+    if (existingByTelegram && existingByTelegram.rowNumber !== existingByPhone.rowNumber) {
+      await saveClient({
+        ...existingByTelegram,
+        telegram_id: '',
+      });
+    }
+
+    await saveClient({
+      ...existingByPhone,
+      telegram_id: telegramId || existingByPhone.telegram_id,
+      name: existingByPhone.name || name,
+      phone: normalizedPhone,
+    });
+
+    return await getClientByPhone(normalizedPhone);
+  }
+
+  if (existingByTelegram) {
+    await saveClient({
+      ...existingByTelegram,
+      telegram_id: telegramId,
+      name: existingByTelegram.name || name,
+      phone: normalizedPhone,
+    });
+
+    return await getClientByPhone(normalizedPhone);
+  }
+
+  return await createClient({
+    telegramId,
+    name,
+    phone: normalizedPhone,
+  });
+}
+
+async function changeBonusBalanceByPhone(phone, delta) {
+  const client = await getClientByPhone(phone);
+  if (!client) throw new Error(`Client not found: ${phone}`);
 
   const next = round2(Math.max(0, client.bonus_balance + delta));
-  await updateRowCells(SHEET_CLIENTS, client.rowNumber, 'D', [next, nowIso()]);
+  await updateRowCells(SHEET_CLIENTS, client.rowNumber, 'D', [
+    next,
+    client.created_at || nowIso(),
+    nowIso(),
+  ]);
   return next;
 }
 
@@ -765,7 +966,7 @@ async function addHistory(row) {
   await appendRow(SHEET_HISTORY, [
     row.operation_id,
     row.date || nowIso(),
-    row.telegram_id,
+    row.telegram_id || '',
     row.type,
     row.amount,
     row.comment,
@@ -773,6 +974,21 @@ async function addHistory(row) {
     row.rental_id || '',
     row.rental_datetime || '',
     row.duplicate_key || '',
+    row.phone || '',
+  ]);
+}
+
+async function addRentalEntry(entry) {
+  await appendRow(SHEET_RENTALS, [
+    entry.entry_id || buildRentalEntryId(),
+    entry.created_at || nowIso(),
+    entry.client_name || '',
+    entry.phone || '',
+    entry.rental_amount || 0,
+    entry.bonus_amount || 0,
+    entry.rental_datetime || '',
+    entry.admin_id || '',
+    entry.telegram_id || '',
   ]);
 }
 
@@ -811,13 +1027,26 @@ async function getRequestById(requestId) {
   return null;
 }
 
-async function getClientHistory(telegramId, limit = 10) {
+async function getClientHistory(clientIdentifier, limit = 10) {
+  const client =
+    typeof clientIdentifier === 'object' && clientIdentifier !== null
+      ? clientIdentifier
+      : await findClientByIdentifier(clientIdentifier);
+
+  if (!client) return [];
+
+  const normalizedPhone = normalizePhone(client.phone);
+  const legacyTelegramId = safeString(client.telegram_id);
   const rows = await getAllRows(SHEET_HISTORY);
   const history = [];
 
   for (let i = 1; i < rows.length; i++) {
-    if (safeString(rows[i][2]) !== safeString(telegramId)) continue;
-    history.push(mapHistoryRow(rows[i], i));
+    const item = mapHistoryRow(rows[i], i);
+    const itemPhone = normalizePhone(item.phone);
+    const sameByPhone = normalizedPhone && itemPhone && normalizedPhone === itemPhone;
+    const sameLegacyTelegram = !itemPhone && legacyTelegramId && item.telegram_id === legacyTelegramId;
+    if (!sameByPhone && !sameLegacyTelegram) continue;
+    history.push(item);
   }
 
   return history
@@ -828,6 +1057,33 @@ async function getClientHistory(telegramId, limit = 10) {
     })
     .slice(0, limit)
     .map(({ _sort_index, ...item }) => item);
+}
+
+async function getClientRentals(clientIdentifier, limit = 10) {
+  const client =
+    typeof clientIdentifier === 'object' && clientIdentifier !== null
+      ? clientIdentifier
+      : await findClientByIdentifier(clientIdentifier);
+
+  if (!client) return [];
+
+  const normalizedPhone = normalizePhone(client.phone);
+  const legacyTelegramId = safeString(client.telegram_id);
+  const rows = await getAllRows(SHEET_RENTALS);
+  const rentals = [];
+
+  for (let i = 1; i < rows.length; i++) {
+    const item = mapRentalRow(rows[i], i + 1);
+    const itemPhone = normalizePhone(item.phone);
+    const sameByPhone = normalizedPhone && itemPhone && normalizedPhone === itemPhone;
+    const sameLegacyTelegram = !itemPhone && legacyTelegramId && item.telegram_id === legacyTelegramId;
+    if (!sameByPhone && !sameLegacyTelegram) continue;
+    rentals.push(item);
+  }
+
+  return rentals
+    .sort((a, b) => dateTimeToTimestamp(b.rental_datetime || b.created_at) - dateTimeToTimestamp(a.rental_datetime || a.created_at))
+    .slice(0, limit);
 }
 
 async function getPendingRequests() {
@@ -847,18 +1103,15 @@ async function markRequestStatus(requestId, status, adminId) {
   await updateRowCells(SHEET_REQUESTS, req.rowNumber, 'H', [status, adminId || '']);
 }
 
-async function requestLooksDuplicate(telegramId, rentalAmount, rentalDateTime, rentalId) {
+async function requestLooksDuplicate(phone, rentalDateTime) {
   const rows = await getAllRows(SHEET_REQUESTS);
   for (let i = 1; i < rows.length; i++) {
-    const sameClient = safeString(rows[i][2]) === safeString(telegramId);
-    const sameAmount = safeNumber(rows[i][4]) === safeNumber(rentalAmount);
+    const sameClient = normalizePhone(rows[i][3]) === normalizePhone(phone);
     const sameDateTime = normalizeDateTime(rows[i][10]) === normalizeDateTime(rentalDateTime);
-    const sameRentalId = safeString(rows[i][9]) === safeString(rentalId);
     const activeStatus = [REQUEST_STATUS.PENDING, REQUEST_STATUS.APPROVED].includes(safeString(rows[i][7]));
 
     if (!activeStatus) continue;
-    if (rentalId && sameClient && sameRentalId) return true;
-    if (!rentalId && sameClient && sameAmount && sameDateTime) return true;
+    if (sameClient && sameDateTime) return true;
   }
   return false;
 }
@@ -932,11 +1185,24 @@ bot.processUpdate = (update) => {
 function clientKeyboard() {
   return {
     keyboard: [
-      [{ text: BUTTONS.MY_CARD }, { text: BUTTONS.MY_BALANCE }],
-      [{ text: BUTTONS.USE_BONUSES }],
+      [{ text: BUTTONS.MY_BALANCE }, { text: BUTTONS.PROFILE }],
+      [{ text: BUTTONS.BONUS_HISTORY }, { text: BUTTONS.RENTAL_HISTORY }],
+      [{ text: BUTTONS.CLIENT_QR_ID }, { text: BUTTONS.FAQ }],
       [{ text: BUTTONS.CONTACT_MANAGER }],
     ],
     resize_keyboard: true,
+  };
+}
+
+function managerKeyboard() {
+  return {
+    keyboard: [
+      [{ text: BUTTONS.MANAGER_TOPIC_RENTAL }, { text: BUTTONS.MANAGER_TOPIC_BONUSES }],
+      [{ text: BUTTONS.MANAGER_CALLBACK }],
+      [{ text: BUTTONS.BACK }],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true,
   };
 }
 
@@ -951,10 +1217,10 @@ function contactKeyboard() {
 function adminKeyboard() {
   return {
     keyboard: [
-      [{ text: BUTTONS.FIND_CLIENT }, { text: BUTTONS.CLIENT_BALANCE }],
-      [{ text: BUTTONS.CLIENT_HISTORY }, { text: BUTTONS.ACCRUE_BONUSES }],
+      [{ text: BUTTONS.FIND_CLIENT }, { text: BUTTONS.CLIENT_LIST }],
+      [{ text: BUTTONS.CLIENT_BALANCE }, { text: BUTTONS.CLIENT_HISTORY }],
+      [{ text: BUTTONS.ACCRUE_BONUSES }],
       [{ text: BUTTONS.MANUAL_ACCRUAL }, { text: BUTTONS.MANUAL_REDEEM }],
-      [{ text: BUTTONS.REDEEM_REQUESTS }],
     ],
     resize_keyboard: true,
   };
@@ -976,10 +1242,37 @@ async function sendMessage(chatId, text, replyMarkup) {
   return await bot.sendMessage(chatId, text, opts);
 }
 
+async function sendPhoto(chatId, photo, caption, replyMarkup) {
+  const opts = {};
+  if (caption) opts.caption = caption;
+  if (replyMarkup) opts.reply_markup = replyMarkup;
+  return await bot.sendPhoto(chatId, photo, opts);
+}
+
+async function sendMessageIfPossible(chatId, text, replyMarkup) {
+  if (!chatId) return null;
+  return sendMessage(chatId, text, replyMarkup);
+}
+
+async function notifyManagersAboutClientTopic(client, topic, isCallbackRequest = false) {
+  const title = isCallbackRequest ? 'Запрос обратного звонка' : 'Запрос связи с менеджером';
+  const text = [
+    title,
+    `Тема: ${topic}`,
+    `Клиент: ${client.name || 'Без имени'}`,
+    '',
+    formatClientCard(client),
+  ].join('\n');
+
+  for (const adminId of adminIds) {
+    await sendMessage(adminId, text);
+  }
+}
+
 async function notifyAdminsAboutRequest(requestId) {
   const request = await getRequestById(requestId);
   if (!request) return;
-  const client = await getClientByTelegramId(request.telegram_id);
+  const client = await getClientByPhone(request.phone) || await getClientByTelegramId(request.telegram_id);
   const requestText = `Новая заявка на списание\n${formatRequestCard(request, client)}`;
 
   for (const adminId of adminIds) {
@@ -1024,11 +1317,11 @@ async function handleStart(chatId, telegramId) {
     );
   }
 
-  await setState(telegramId, STATES.WAITING_NAME, {});
-  return sendMessage(chatId, 'Добро пожаловать в Doncar Club.\n\nДля регистрации отправьте ваше имя.');
+  await setState(telegramId, STATES.WAITING_PHONE_CONTACT, {});
+  return sendMessage(chatId, `Добро пожаловать в Doncar Club.\n\n${TEXT.WAIT_PHONE_CONTACT}`, contactKeyboard());
 }
 
-async function handleContact(chatId, telegramId, contact) {
+async function handleContact(chatId, telegramId, contact, fromUser) {
   const state = await getState(telegramId);
 
   if (state !== STATES.WAITING_PHONE_CONTACT) {
@@ -1044,24 +1337,18 @@ async function handleContact(chatId, telegramId, contact) {
     return sendMessage(chatId, TEXT.INVALID_PHONE);
   }
 
-  const temp = await parseStateData(telegramId);
-  const name = temp.name || 'Без имени';
-
-  await upsertClient(telegramId, name, phone);
+  const client = await upsertClient(telegramId, getTelegramDisplayName(fromUser), phone);
   await clearState(telegramId);
-
-  return sendMessage(chatId, TEXT.REGISTER_COMPLETE, clientKeyboard());
-}
-
-async function handleMyCard(chatId, telegramId) {
-  const client = await getClientByTelegramId(telegramId);
-  if (!client) return sendMessage(chatId, TEXT.REGISTER_FIRST);
 
   return sendMessage(
     chatId,
-    `Карта Doncar Club\n\nИмя: ${client.name}\nТелефон: ${formatPhoneDisplay(client.phone)}\nБаланс: ${round2(client.bonus_balance)} бонусов`,
+    `${TEXT.REGISTER_COMPLETE}\nВаш баланс: ${round2(client?.bonus_balance)} бонусов`,
     clientKeyboard()
   );
+}
+
+async function handleMyCard(chatId, telegramId) {
+  return handleMyBalance(chatId, telegramId);
 }
 
 async function handleMyBalance(chatId, telegramId) {
@@ -1071,15 +1358,94 @@ async function handleMyBalance(chatId, telegramId) {
   return sendMessage(chatId, `Ваш баланс: ${round2(client.bonus_balance)} бонусов`, clientKeyboard());
 }
 
-async function handleUseBonuses(chatId, telegramId) {
+async function handleBonusHistory(chatId, telegramId) {
   const client = await getClientByTelegramId(telegramId);
   if (!client) return sendMessage(chatId, TEXT.REGISTER_FIRST);
 
-  await setState(telegramId, STATES.CLIENT_WAITING_RENTAL_AMOUNT_FOR_REDEEM, {});
+  const history = await getClientHistory(client, 15);
+  return sendMessage(chatId, `История бонусов\n\n${formatClientHistory(history)}`, clientKeyboard());
+}
+
+async function handleRentalHistory(chatId, telegramId) {
+  const client = await getClientByTelegramId(telegramId);
+  if (!client) return sendMessage(chatId, TEXT.REGISTER_FIRST);
+
+  const rentals = await getClientRentals(client, 15);
+  return sendMessage(chatId, `История аренд\n\n${formatRentalsHistory(rentals)}`, clientKeyboard());
+}
+
+async function handleProfile(chatId, telegramId) {
+  const client = await getClientByTelegramId(telegramId);
+  if (!client) return sendMessage(chatId, TEXT.REGISTER_FIRST);
+
+  return sendMessage(chatId, formatProfileMessage(client), clientKeyboard());
+}
+
+async function handleFaq(chatId, telegramId) {
+  const client = await getClientByTelegramId(telegramId);
+  if (!client) return sendMessage(chatId, TEXT.REGISTER_FIRST);
+
+  return sendMessage(chatId, formatFaqMessage(), clientKeyboard());
+}
+
+async function handleClientQrId(chatId, telegramId) {
+  const client = await getClientByTelegramId(telegramId);
+  if (!client) return sendMessage(chatId, TEXT.REGISTER_FIRST);
+
+  const clientId = buildClientPublicId(client);
+  const qrBuffer = await QRCode.toBuffer(client.phone, {
+    type: 'png',
+    width: 400,
+    margin: 1,
+  });
+
+  return sendPhoto(
+    chatId,
+    qrBuffer,
+    `ID клиента: ${clientId}\nТелефон: ${formatPhoneDisplay(client.phone)}\nПокажите QR менеджеру для быстрого поиска.`,
+    clientKeyboard()
+  );
+}
+
+async function handleContactManagerMenu(chatId, telegramId) {
+  const client = await getClientByTelegramId(telegramId);
+  if (!client) return sendMessage(chatId, TEXT.REGISTER_FIRST);
+
+  if (!adminIds.length) {
+    return sendMessage(chatId, 'Менеджеры пока не настроены. Попробуйте позже.', clientKeyboard());
+  }
+
   return sendMessage(
     chatId,
-    'Введите сумму новой аренды. Бот рассчитает, сколько бонусов можно использовать.\nЛимит: до 10% от суммы аренды.'
+    `Уведомление будет отправлено всем менеджерам.\n\n${TEXT.MANAGER_MENU}`,
+    managerKeyboard()
   );
+}
+
+async function handleManagerTopic(chatId, telegramId, topic, isCallbackRequest = false) {
+  const client = await getClientByTelegramId(telegramId);
+  if (!client) return sendMessage(chatId, TEXT.REGISTER_FIRST);
+
+  if (!adminIds.length) {
+    return sendMessage(chatId, 'Менеджеры пока не настроены. Попробуйте позже.', clientKeyboard());
+  }
+
+  await notifyManagersAboutClientTopic(client, topic, isCallbackRequest);
+
+  const response = isCallbackRequest
+    ? 'Запрос на обратный звонок отправлен менеджерам.'
+    : `Запрос по теме "${topic}" отправлен менеджерам.`;
+
+  return sendMessage(
+    chatId,
+    `${response}\nОжидайте, с вами свяжутся.`,
+    clientKeyboard()
+  );
+}
+
+async function handleUseBonuses(chatId, telegramId) {
+  await clearState(telegramId);
+  return sendMessage(chatId, TEXT.REDEEM_BY_ADMIN_ONLY, clientKeyboard());
 }
 
 async function sendPendingRequests(chatId) {
@@ -1092,7 +1458,7 @@ async function sendPendingRequests(chatId) {
   }
 
   for (const req of requests) {
-    const client = await getClientByTelegramId(req.telegram_id);
+    const client = await getClientByPhone(req.phone) || await getClientByTelegramId(req.telegram_id);
     await sendMessage(
       chatId,
       formatRequestCard(req, client),
@@ -1106,9 +1472,30 @@ async function sendPendingRequests(chatId) {
   }
 }
 
-async function setAdminClientFocus(adminTelegramId, clientTelegramId) {
+async function sendClientsList(chatId) {
+  const clients = await getClients();
+  if (!clients.length) return sendMessage(chatId, TEXT.CLIENTS_LIST_EMPTY);
+
+  const sortedClients = clients.sort((a, b) => {
+    const nameCompare = safeString(a.name).localeCompare(safeString(b.name), 'ru');
+    if (nameCompare !== 0) return nameCompare;
+    return safeString(a.phone).localeCompare(safeString(b.phone), 'ru');
+  });
+
+  const lines = sortedClients.map((client, index) => formatClientListLine(client, index + 1));
+  const messages = splitTextByLimit(lines, 3500);
+
+  for (let i = 0; i < messages.length; i++) {
+    const prefix = i === 0 ? 'Список клиентов\n\n' : 'Продолжение списка клиентов\n\n';
+    await sendMessage(chatId, `${prefix}${messages[i]}`);
+  }
+
+  return true;
+}
+
+async function setAdminClientFocus(adminTelegramId, clientPhone) {
   await setState(adminTelegramId, STATES.ADMIN_CLIENT_ACTIONS, {
-    target_telegram_id: clientTelegramId,
+    target_phone: clientPhone,
   });
 }
 
@@ -1123,7 +1510,7 @@ async function sendClientSummary(chatId, identifier, replyMarkup) {
   const client = await findClientByIdentifier(identifier);
   if (!client) return sendMessage(chatId, TEXT.CLIENT_NOT_FOUND);
 
-  const history = await getClientHistory(client.telegram_id, 10);
+  const history = await getClientHistory(client, 10);
 
   return sendMessage(chatId, formatClientSummaryMessage(client, history), replyMarkup);
 }
@@ -1142,15 +1529,13 @@ async function approveRequest(chatId, adminTelegramId, requestId) {
     return sendMessage(chatId, formatRequestProcessedMessage(request.status));
   }
 
-  const client = await getClientByTelegramId(request.telegram_id);
+  const client = await getClientByPhone(request.phone) || await getClientByTelegramId(request.telegram_id);
   if (!client) return sendMessage(chatId, TEXT.CLIENT_NOT_FOUND);
 
   const duplicateKey = buildDuplicateKey(
     OPERATION_TYPE.REDEEM,
-    request.telegram_id,
-    request.rental_amount,
-    request.rental_datetime,
-    request.rental_id
+    client.phone,
+    request.rental_datetime
   );
 
   if (await historyDuplicateKeyExists(duplicateKey)) {
@@ -1170,23 +1555,23 @@ async function approveRequest(chatId, adminTelegramId, requestId) {
   }
 
   const operationId = buildOperationId(OPERATION_TYPE.REDEEM);
-  const nextBalance = await changeBonusBalance(request.telegram_id, -allowed);
+  const nextBalance = await changeBonusBalanceByPhone(client.phone, -allowed);
   await addHistory({
     operation_id: operationId,
-    telegram_id: request.telegram_id,
+    telegram_id: client.telegram_id,
     type: OPERATION_TYPE.REDEEM,
     amount: allowed,
     comment: `Списание на аренду ${request.rental_amount} ₽`,
     admin_id: adminTelegramId,
-    rental_id: request.rental_id,
     rental_datetime: request.rental_datetime,
     duplicate_key: duplicateKey,
+    phone: client.phone,
   });
 
   await markRequestStatus(requestId, REQUEST_STATUS.APPROVED, adminTelegramId);
   logEvent('REQUEST', { action: 'approved', requestId, adminId: adminTelegramId, telegramId: request.telegram_id });
   logEvent('REDEEM', {
-    telegramId: request.telegram_id,
+    telegramId: client.telegram_id,
     adminId: adminTelegramId,
     amount: allowed,
     balance: nextBalance,
@@ -1194,8 +1579,8 @@ async function approveRequest(chatId, adminTelegramId, requestId) {
   });
 
   await sendMessage(chatId, `Списание подтверждено.\n${formatRedeemMessage(allowed, nextBalance)}`);
-  return sendMessage(
-    request.telegram_id,
+  return sendMessageIfPossible(
+    client.telegram_id,
     `Ваш запрос подтверждён.\nСписано: ${allowed} бонусов\nТекущий баланс: ${nextBalance}`,
     clientKeyboard()
   );
@@ -1211,7 +1596,7 @@ async function rejectRequest(chatId, adminTelegramId, requestId) {
   await markRequestStatus(requestId, REQUEST_STATUS.REJECTED, adminTelegramId);
   logEvent('REQUEST', { action: 'rejected', requestId, adminId: adminTelegramId, telegramId: request.telegram_id });
   await sendMessage(chatId, formatRequestRejectedMessage(requestId));
-  return sendMessage(
+  return sendMessageIfPossible(
     request.telegram_id,
     TEXT.REQUEST_REJECTED_CLIENT,
     clientKeyboard()
@@ -1225,9 +1610,9 @@ async function buildMessageContext(message) {
   const state = await getState(telegramId);
   const isAdminUser = isAdmin(telegramId);
   const stateData = isAdminUser ? await parseStateData(telegramId) : {};
-  const focusedClientId =
+  const focusedClientPhone =
     isAdminUser && state === STATES.ADMIN_CLIENT_ACTIONS
-      ? safeString(stateData.target_telegram_id)
+      ? safeString(stateData.target_phone)
       : '';
 
   return {
@@ -1238,7 +1623,7 @@ async function buildMessageContext(message) {
     state,
     stateData,
     isAdminUser,
-    focusedClientId,
+    focusedClientPhone,
   };
 }
 
@@ -1306,14 +1691,14 @@ async function handleCommand(context) {
 
   const identifier = safeString(clientCommandMatch[1]).trim();
   if (!identifier) {
-    return sendMessage(chatId, 'Использование:\n/client <telegram_id_или_телефон>');
+    return sendMessage(chatId, 'Использование:\n/client <телефон>');
   }
 
   const client = await findClientOrSendMessage(chatId, identifier);
   if (!client) return true;
 
-  await setAdminClientFocus(telegramId, client.telegram_id);
-  return sendClientSummary(chatId, client.telegram_id, adminClientActionsKeyboard());
+  await setAdminClientFocus(telegramId, client.phone);
+  return sendClientSummary(chatId, client.phone, adminClientActionsKeyboard());
 }
 
 async function handleClientMenuAction(context) {
@@ -1321,37 +1706,44 @@ async function handleClientMenuAction(context) {
 
   if (text === BUTTONS.MY_CARD) return handleMyCard(chatId, telegramId);
   if (text === BUTTONS.MY_BALANCE) return handleMyBalance(chatId, telegramId);
+  if (text === BUTTONS.BONUS_HISTORY) return handleBonusHistory(chatId, telegramId);
+  if (text === BUTTONS.RENTAL_HISTORY) return handleRentalHistory(chatId, telegramId);
+  if (text === BUTTONS.PROFILE) return handleProfile(chatId, telegramId);
+  if (text === BUTTONS.FAQ) return handleFaq(chatId, telegramId);
+  if (text === BUTTONS.CLIENT_QR_ID) return handleClientQrId(chatId, telegramId);
   if (text === BUTTONS.USE_BONUSES) return handleUseBonuses(chatId, telegramId);
-  if (text === BUTTONS.CONTACT_MANAGER) {
-    return sendMessage(chatId, `Связаться с менеджером: @${MANAGER_USERNAME}`, clientKeyboard());
-  }
+  if (text === BUTTONS.CONTACT_MANAGER) return handleContactManagerMenu(chatId, telegramId);
+  if (text === BUTTONS.MANAGER_TOPIC_RENTAL) return handleManagerTopic(chatId, telegramId, 'Аренда');
+  if (text === BUTTONS.MANAGER_TOPIC_BONUSES) return handleManagerTopic(chatId, telegramId, 'Бонусы');
+  if (text === BUTTONS.MANAGER_CALLBACK) return handleManagerTopic(chatId, telegramId, 'Обратный звонок', true);
+  if (text === BUTTONS.BACK) return sendMessage(chatId, 'Главное меню', clientKeyboard());
 
   return null;
 }
 
 async function handleAdminAction(context) {
-  const { chatId, telegramId, text, isAdminUser, focusedClientId } = context;
+  const { chatId, telegramId, text, isAdminUser, focusedClientPhone } = context;
   if (!isAdminUser) return null;
 
   if (text === BUTTONS.ADMIN_MENU) {
     return sendAdminMenu(chatId, telegramId);
   }
 
-  if (focusedClientId && text === BUTTONS.CLIENT_HISTORY) {
-    await setAdminClientFocus(telegramId, focusedClientId);
-    return sendClientSummary(chatId, focusedClientId, adminClientActionsKeyboard());
+  if (focusedClientPhone && text === BUTTONS.CLIENT_HISTORY) {
+    await setAdminClientFocus(telegramId, focusedClientPhone);
+    return sendClientSummary(chatId, focusedClientPhone, adminClientActionsKeyboard());
   }
 
-  if (focusedClientId && text === BUTTONS.MANUAL_ACCRUAL) {
+  if (focusedClientPhone && text === BUTTONS.MANUAL_ACCRUAL) {
     await setState(telegramId, STATES.ADMIN_WAITING_MANUAL_ACCRUAL_AMOUNT, {
-      target_telegram_id: focusedClientId,
+      target_phone: focusedClientPhone,
     });
     return sendMessage(chatId, TEXT.WAIT_MANUAL_ACCRUAL_AMOUNT);
   }
 
-  if (focusedClientId && text === BUTTONS.MANUAL_REDEEM) {
+  if (focusedClientPhone && text === BUTTONS.MANUAL_REDEEM) {
     await setState(telegramId, STATES.ADMIN_WAITING_MANUAL_REDEEM_AMOUNT, {
-      target_telegram_id: focusedClientId,
+      target_phone: focusedClientPhone,
     });
     return sendMessage(chatId, TEXT.WAIT_MANUAL_REDEEM_AMOUNT);
   }
@@ -1359,6 +1751,10 @@ async function handleAdminAction(context) {
   if (text === BUTTONS.FIND_CLIENT) {
     await setState(telegramId, STATES.ADMIN_WAITING_FIND_IDENTIFIER, {});
     return sendMessage(chatId, TEXT.WAIT_IDENTIFIER);
+  }
+
+  if (text === BUTTONS.CLIENT_LIST) {
+    return sendClientsList(chatId);
   }
 
   if (text === BUTTONS.CLIENT_BALANCE) {
@@ -1386,139 +1782,91 @@ async function handleAdminAction(context) {
     return sendMessage(chatId, TEXT.WAIT_IDENTIFIER);
   }
 
-  if (text === BUTTONS.REDEEM_REQUESTS) {
-    return sendPendingRequests(chatId);
-  }
-
   return null;
 }
 
 async function handleWaitingNameState(context) {
-  const { chatId, telegramId, text } = context;
+  await setState(context.telegramId, STATES.WAITING_PHONE_CONTACT, {});
+  return sendMessage(context.chatId, TEXT.WAIT_PHONE_CONTACT, contactKeyboard());
+}
 
-  if (!text || text.length < 2) {
-    return sendMessage(chatId, TEXT.INVALID_NAME);
-  }
-
-  await setState(telegramId, STATES.WAITING_PHONE_CONTACT, { name: text });
-  return sendMessage(chatId, TEXT.SEND_CONTACT_PROMPT, contactKeyboard());
+async function handleWaitingPhoneContactState(context) {
+  return sendMessage(context.chatId, TEXT.WAIT_PHONE_CONTACT, contactKeyboard());
 }
 
 async function handleClientWaitingRentalAmountState(context) {
-  const { chatId, telegramId, text } = context;
-  const amount = parseMoney(text);
-  if (!amount || amount <= 0) return sendMessage(chatId, TEXT.INVALID_RENTAL_AMOUNT);
-
-  const client = await getClientByTelegramId(telegramId);
-  if (!client) {
-    await clearState(telegramId);
-    return sendMessage(chatId, TEXT.REGISTER_FIRST);
-  }
-
-  const maxAllowed = round2(amount * 0.10);
-  const requested = round2(Math.min(client.bonus_balance, maxAllowed));
-
-  if (requested <= 0) {
-    await clearState(telegramId);
-    return sendMessage(chatId, formatNoRedeemAvailableMessage(client), clientKeyboard());
-  }
-
-  await setState(telegramId, STATES.CLIENT_WAITING_REDEEM_DATETIME, {
-    rental_amount: amount,
-    max_allowed_bonus: maxAllowed,
-    requested_bonus: requested,
-  });
-
-  return sendMessage(chatId, formatAdminRentalCalculation(amount, client, maxAllowed, requested));
+  await clearState(context.telegramId);
+  return sendMessage(context.chatId, TEXT.REDEEM_BY_ADMIN_ONLY, clientKeyboard());
 }
 
 async function handleClientWaitingRedeemDatetimeState(context) {
-  const { chatId, telegramId, text } = context;
-  const rentalDateTime = normalizeDateTime(text);
-  if (!rentalDateTime) return sendMessage(chatId, TEXT.DATE_PROMPT);
-
-  const temp = await parseStateData(telegramId);
-  temp.rental_datetime = rentalDateTime;
-  await setState(telegramId, STATES.CLIENT_WAITING_REDEEM_RENTAL_ID, temp);
-
-  return sendMessage(chatId, TEXT.REQUEST_RENTAL_ID_PROMPT);
+  await clearState(context.telegramId);
+  return sendMessage(context.chatId, TEXT.REDEEM_BY_ADMIN_ONLY, clientKeyboard());
 }
 
 async function handleClientWaitingRedeemRentalIdState(context) {
-  const { chatId, telegramId, text } = context;
-  const temp = await parseStateData(telegramId);
-  const client = await getClientByTelegramId(telegramId);
-
-  if (!client) {
-    await clearState(telegramId);
-    return sendMessage(chatId, TEXT.CLIENT_NOT_FOUND_REGISTER);
-  }
-
-  const rentalId = text === '-' ? '' : text;
-
-  if (await requestLooksDuplicate(telegramId, temp.rental_amount, temp.rental_datetime, rentalId)) {
-    await clearState(telegramId);
-    return sendMessage(chatId, TEXT.SAME_REQUEST_EXISTS, clientKeyboard());
-  }
-
-  const requestId = buildRequestId(telegramId);
-
-  await addRequest({
-    request_id: requestId,
-    telegram_id: telegramId,
-    phone: client.phone,
-    rental_amount: temp.rental_amount,
-    max_allowed_bonus: temp.max_allowed_bonus,
-    requested_bonus: temp.requested_bonus,
-    status: REQUEST_STATUS.PENDING,
-    admin_id: '',
-    rental_id: rentalId,
-    rental_datetime: temp.rental_datetime,
-  });
-
-  logEvent('REQUEST', {
-    action: 'created',
-    telegramId,
-    requestId,
-    requestedBonus: temp.requested_bonus,
-    rentalAmount: temp.rental_amount,
-  });
-
-  await clearState(telegramId);
-  await sendMessage(chatId, formatRequestCreatedMessage(requestId, temp.requested_bonus), clientKeyboard());
-  return notifyAdminsAboutRequest(requestId);
+  await clearState(context.telegramId);
+  return sendMessage(context.chatId, TEXT.REDEEM_BY_ADMIN_ONLY, clientKeyboard());
 }
 
 async function handleAdminWaitingFindIdentifierState(context) {
   const client = await findClientOrSendMessage(context.chatId, context.text);
   if (!client) return true;
 
-  await setAdminClientFocus(context.telegramId, client.telegram_id);
-  return sendFoundClientCard(context.chatId, client.telegram_id, adminClientActionsKeyboard());
+  await setAdminClientFocus(context.telegramId, client.phone);
+  return sendFoundClientCard(context.chatId, client.phone, adminClientActionsKeyboard());
 }
 
 async function handleAdminWaitingHistoryIdentifierState(context) {
   const client = await findClientOrSendMessage(context.chatId, context.text);
   if (!client) return true;
 
-  await setAdminClientFocus(context.telegramId, client.telegram_id);
-  return sendClientSummary(context.chatId, client.telegram_id, adminClientActionsKeyboard());
+  await setAdminClientFocus(context.telegramId, client.phone);
+  return sendClientSummary(context.chatId, client.phone, adminClientActionsKeyboard());
 }
 
 async function handleAdminWaitingBalanceIdentifierState(context) {
   const client = await findClientOrSendMessage(context.chatId, context.text);
   if (!client) return true;
 
-  await setAdminClientFocus(context.telegramId, client.telegram_id);
-  return sendClientBalanceInfo(context.chatId, client.telegram_id, adminClientActionsKeyboard());
+  await setAdminClientFocus(context.telegramId, client.phone);
+  return sendClientBalanceInfo(context.chatId, client.phone, adminClientActionsKeyboard());
 }
 
 async function handleAdminWaitingClientIdentifierState(context) {
-  const client = await findClientOrSendMessage(context.chatId, context.text);
-  if (!client) return true;
+  const phone = normalizePhone(context.text);
+  if (!phone) return sendMessage(context.chatId, TEXT.INVALID_PHONE);
+
+  const client = await getClientByPhone(phone);
+  if (!client) {
+    await setState(context.telegramId, STATES.ADMIN_WAITING_NEW_CLIENT_NAME, {
+      target_phone: phone,
+    });
+    return sendMessage(context.chatId, TEXT.WAIT_NEW_CLIENT_NAME);
+  }
 
   await setState(context.telegramId, STATES.ADMIN_WAITING_ACCRUAL_AMOUNT, {
-    target_telegram_id: client.telegram_id,
+    target_phone: client.phone,
+  });
+
+  return sendMessage(context.chatId, formatClientPromptMessage(client, TEXT.WAIT_RENTAL_AMOUNT));
+}
+
+async function handleAdminWaitingNewClientNameState(context) {
+  const name = context.text.trim();
+  if (!name || name.length < 2) return sendMessage(context.chatId, TEXT.INVALID_NAME);
+
+  const temp = await parseStateData(context.telegramId);
+  const phone = normalizePhone(temp.target_phone);
+  if (!phone) {
+    await clearState(context.telegramId);
+    return sendMessage(context.chatId, TEXT.INVALID_PHONE);
+  }
+
+  const client = await upsertClient('', name, phone);
+
+  await setState(context.telegramId, STATES.ADMIN_WAITING_ACCRUAL_AMOUNT, {
+    target_phone: client.phone,
   });
 
   return sendMessage(context.chatId, formatClientPromptMessage(client, TEXT.WAIT_RENTAL_AMOUNT));
@@ -1529,7 +1877,7 @@ async function handleAdminWaitingManualAccrualIdentifierState(context) {
   if (!client) return true;
 
   await setState(context.telegramId, STATES.ADMIN_WAITING_MANUAL_ACCRUAL_AMOUNT, {
-    target_telegram_id: client.telegram_id,
+    target_phone: client.phone,
   });
 
   return sendMessage(context.chatId, formatClientPromptMessage(client, TEXT.WAIT_MANUAL_ACCRUAL_AMOUNT));
@@ -1548,8 +1896,8 @@ async function handleAdminWaitingManualAccrualAmountState(context) {
 
 async function handleAdminWaitingManualAccrualCommentState(context) {
   const temp = await parseStateData(context.telegramId);
-  const targetTelegramId = safeString(temp.target_telegram_id);
-  const client = await getClientByTelegramId(targetTelegramId);
+  const targetPhone = safeString(temp.target_phone);
+  const client = await getClientByPhone(targetPhone);
 
   if (!client) {
     await setState(context.telegramId, STATES.ADMIN_WAITING_MANUAL_ACCRUAL_IDENTIFIER, {});
@@ -1559,42 +1907,44 @@ async function handleAdminWaitingManualAccrualCommentState(context) {
   const comment = context.text.trim();
   if (!comment) return sendMessage(context.chatId, TEXT.COMMENT_REQUIRED);
 
-  const duplicateKey = buildManualAccrualDuplicateKey(targetTelegramId, temp.bonus_amount, comment);
+  const duplicateKey = buildManualAccrualDuplicateKey(client.phone, temp.bonus_amount, comment);
   if (await historyDuplicateKeyExists(duplicateKey)) {
     return sendMessage(context.chatId, TEXT.DUPLICATE_MANUAL_OPERATION);
   }
 
   const operationId = buildOperationId(OPERATION_TYPE.MANUAL_ACCRUAL);
   const rentalDateTime = currentDisplayDateTime();
-  const nextBalance = await changeBonusBalance(targetTelegramId, temp.bonus_amount);
+  const nextBalance = await changeBonusBalanceByPhone(client.phone, temp.bonus_amount);
 
   await addHistory({
     operation_id: operationId,
-    telegram_id: targetTelegramId,
+    telegram_id: client.telegram_id,
     type: OPERATION_TYPE.MANUAL_ACCRUAL,
     amount: temp.bonus_amount,
     comment,
     admin_id: context.telegramId,
     rental_datetime: rentalDateTime,
     duplicate_key: duplicateKey,
+    phone: client.phone,
   });
 
   logEvent('MANUAL_ACCRUAL', {
-    telegramId: targetTelegramId,
+    telegramId: client.telegram_id,
     adminId: context.telegramId,
     amount: temp.bonus_amount,
     balance: nextBalance,
   });
 
-  await setAdminClientFocus(context.telegramId, targetTelegramId);
+  await setAdminClientFocus(context.telegramId, client.phone);
   await sendMessage(context.chatId, formatAccrualMessage(temp.bonus_amount, nextBalance));
-  await sendFoundClientCard(context.chatId, targetTelegramId, adminClientActionsKeyboard());
+  await sendFoundClientCard(context.chatId, client.phone, adminClientActionsKeyboard());
 
-  return sendMessage(
-    targetTelegramId,
+  await sendMessageIfPossible(
+    client.telegram_id,
     `Вам начислено ${temp.bonus_amount} бонусов.\nТекущий баланс: ${nextBalance} бонусов.`,
     clientKeyboard()
   );
+  return true;
 }
 
 async function handleAdminWaitingManualRedeemIdentifierState(context) {
@@ -1602,7 +1952,7 @@ async function handleAdminWaitingManualRedeemIdentifierState(context) {
   if (!client) return true;
 
   await setState(context.telegramId, STATES.ADMIN_WAITING_MANUAL_REDEEM_AMOUNT, {
-    target_telegram_id: client.telegram_id,
+    target_phone: client.phone,
   });
 
   return sendMessage(context.chatId, formatClientPromptMessage(client, TEXT.WAIT_MANUAL_REDEEM_AMOUNT));
@@ -1621,8 +1971,8 @@ async function handleAdminWaitingManualRedeemAmountState(context) {
 
 async function handleAdminWaitingManualRedeemCommentState(context) {
   const temp = await parseStateData(context.telegramId);
-  const targetTelegramId = safeString(temp.target_telegram_id);
-  const client = await getClientByTelegramId(targetTelegramId);
+  const targetPhone = safeString(temp.target_phone);
+  const client = await getClientByPhone(targetPhone);
 
   if (!client) {
     await setState(context.telegramId, STATES.ADMIN_WAITING_MANUAL_REDEEM_IDENTIFIER, {});
@@ -1634,47 +1984,49 @@ async function handleAdminWaitingManualRedeemCommentState(context) {
 
   if (client.bonus_balance < safeNumber(temp.bonus_amount)) {
     await setState(context.telegramId, STATES.ADMIN_WAITING_MANUAL_REDEEM_AMOUNT, {
-      target_telegram_id: targetTelegramId,
+      target_phone: client.phone,
     });
     return sendMessage(context.chatId, TEXT.NOT_ENOUGH_BONUSES);
   }
 
-  const duplicateKey = buildManualRedeemDuplicateKey(targetTelegramId, temp.bonus_amount, comment);
+  const duplicateKey = buildManualRedeemDuplicateKey(client.phone, temp.bonus_amount, comment);
   if (await historyDuplicateKeyExists(duplicateKey)) {
     return sendMessage(context.chatId, TEXT.DUPLICATE_MANUAL_OPERATION);
   }
 
   const operationId = buildOperationId(OPERATION_TYPE.MANUAL_REDEEM);
   const rentalDateTime = currentDisplayDateTime();
-  const nextBalance = await changeBonusBalance(targetTelegramId, -temp.bonus_amount);
+  const nextBalance = await changeBonusBalanceByPhone(client.phone, -temp.bonus_amount);
 
   await addHistory({
     operation_id: operationId,
-    telegram_id: targetTelegramId,
+    telegram_id: client.telegram_id,
     type: OPERATION_TYPE.MANUAL_REDEEM,
     amount: temp.bonus_amount,
     comment,
     admin_id: context.telegramId,
     rental_datetime: rentalDateTime,
     duplicate_key: duplicateKey,
+    phone: client.phone,
   });
 
   logEvent('MANUAL_REDEEM', {
-    telegramId: targetTelegramId,
+    telegramId: client.telegram_id,
     adminId: context.telegramId,
     amount: temp.bonus_amount,
     balance: nextBalance,
   });
 
-  await setAdminClientFocus(context.telegramId, targetTelegramId);
+  await setAdminClientFocus(context.telegramId, client.phone);
   await sendMessage(context.chatId, formatRedeemMessage(temp.bonus_amount, nextBalance));
-  await sendFoundClientCard(context.chatId, targetTelegramId, adminClientActionsKeyboard());
+  await sendFoundClientCard(context.chatId, client.phone, adminClientActionsKeyboard());
 
-  return sendMessage(
-    targetTelegramId,
+  await sendMessageIfPossible(
+    client.telegram_id,
     `С вашего бонусного баланса списано ${temp.bonus_amount} бонусов.\nТекущий баланс: ${nextBalance} бонусов.`,
     clientKeyboard()
   );
+  return true;
 }
 
 async function handleAdminWaitingAccrualAmountState(context) {
@@ -1695,15 +2047,13 @@ async function handleAdminWaitingAccrualDatetimeState(context) {
   const temp = await parseStateData(context.telegramId);
   temp.rental_datetime = rentalDateTime;
   await setState(context.telegramId, STATES.ADMIN_WAITING_ACCRUAL_RENTAL_ID, temp);
-
-  return sendMessage(context.chatId, TEXT.REQUEST_RENTAL_ID_PROMPT_ADMIN);
+  return handleAdminWaitingAccrualRentalIdState(context);
 }
 
 async function handleAdminWaitingAccrualRentalIdState(context) {
   const temp = await parseStateData(context.telegramId);
-  const rentalId = context.text === '-' ? '' : context.text;
-  const targetTelegramId = safeString(temp.target_telegram_id);
-  const client = await getClientByTelegramId(targetTelegramId);
+  const targetPhone = safeString(temp.target_phone);
+  const client = await getClientByPhone(targetPhone);
 
   if (!client) {
     await clearState(context.telegramId);
@@ -1712,10 +2062,8 @@ async function handleAdminWaitingAccrualRentalIdState(context) {
 
   const duplicateKey = buildDuplicateKey(
     OPERATION_TYPE.ACCRUAL,
-    targetTelegramId,
-    temp.rental_amount,
-    temp.rental_datetime,
-    rentalId
+    client.phone,
+    temp.rental_datetime
   );
 
   if (await historyDuplicateKeyExists(duplicateKey)) {
@@ -1725,39 +2073,51 @@ async function handleAdminWaitingAccrualRentalIdState(context) {
 
   const bonus = round2(temp.rental_amount * 0.05);
   const operationId = buildOperationId(OPERATION_TYPE.ACCRUAL);
-  const nextBalance = await changeBonusBalance(targetTelegramId, bonus);
+  const nextBalance = await changeBonusBalanceByPhone(client.phone, bonus);
   await addHistory({
     operation_id: operationId,
-    telegram_id: targetTelegramId,
+    telegram_id: client.telegram_id,
     type: OPERATION_TYPE.ACCRUAL,
     amount: bonus,
     comment: `5% от аренды ${temp.rental_amount} ₽`,
     admin_id: context.telegramId,
-    rental_id: rentalId,
     rental_datetime: temp.rental_datetime,
     duplicate_key: duplicateKey,
+    phone: client.phone,
+  });
+
+  await addRentalEntry({
+    client_name: client.name,
+    phone: client.phone,
+    rental_amount: temp.rental_amount,
+    bonus_amount: bonus,
+    rental_datetime: temp.rental_datetime,
+    admin_id: context.telegramId,
+    telegram_id: client.telegram_id,
   });
 
   logEvent('ACCRUAL', {
-    telegramId: targetTelegramId,
+    telegramId: client.telegram_id,
     adminId: context.telegramId,
     amount: bonus,
     balance: nextBalance,
   });
 
-  await setAdminClientFocus(context.telegramId, targetTelegramId);
+  await setAdminClientFocus(context.telegramId, client.phone);
   await sendMessage(context.chatId, formatAccrualMessage(bonus, nextBalance));
-  await sendClientSummary(context.chatId, targetTelegramId, adminClientActionsKeyboard());
+  await sendClientSummary(context.chatId, client.phone, adminClientActionsKeyboard());
 
-  return sendMessage(
-    targetTelegramId,
+  await sendMessageIfPossible(
+    client.telegram_id,
     `Вам начислено ${bonus} бонусов.\nТекущий баланс: ${nextBalance} бонусов.`,
     clientKeyboard()
   );
+  return true;
 }
 
 const STATE_HANDLERS = {
   [STATES.WAITING_NAME]: handleWaitingNameState,
+  [STATES.WAITING_PHONE_CONTACT]: handleWaitingPhoneContactState,
   [STATES.CLIENT_WAITING_RENTAL_AMOUNT_FOR_REDEEM]: handleClientWaitingRentalAmountState,
   [STATES.CLIENT_WAITING_REDEEM_DATETIME]: handleClientWaitingRedeemDatetimeState,
   [STATES.CLIENT_WAITING_REDEEM_RENTAL_ID]: handleClientWaitingRedeemRentalIdState,
@@ -1765,6 +2125,7 @@ const STATE_HANDLERS = {
   [STATES.ADMIN_WAITING_HISTORY_IDENTIFIER]: handleAdminWaitingHistoryIdentifierState,
   [STATES.ADMIN_WAITING_BALANCE_IDENTIFIER]: handleAdminWaitingBalanceIdentifierState,
   [STATES.ADMIN_WAITING_CLIENT_IDENTIFIER]: handleAdminWaitingClientIdentifierState,
+  [STATES.ADMIN_WAITING_NEW_CLIENT_NAME]: handleAdminWaitingNewClientNameState,
   [STATES.ADMIN_WAITING_ACCRUAL_AMOUNT]: handleAdminWaitingAccrualAmountState,
   [STATES.ADMIN_WAITING_ACCRUAL_DATETIME]: handleAdminWaitingAccrualDatetimeState,
   [STATES.ADMIN_WAITING_ACCRUAL_RENTAL_ID]: handleAdminWaitingAccrualRentalIdState,
@@ -1796,7 +2157,7 @@ async function handleMessageUpdate(message) {
     state: context.state || STATES.NONE,
   });
 
-  if (message.contact) return handleContact(context.chatId, context.telegramId, message.contact);
+  if (message.contact) return handleContact(context.chatId, context.telegramId, message.contact, message.from);
 
   const handlers = [
     handleCommand,
@@ -1814,7 +2175,7 @@ async function handleMessageUpdate(message) {
     return sendMessage(
       context.chatId,
       TEXT.ACTION_PROMPT,
-      context.focusedClientId ? adminClientActionsKeyboard() : adminKeyboard()
+      context.focusedClientPhone ? adminClientActionsKeyboard() : adminKeyboard()
     );
   }
 

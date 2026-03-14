@@ -45,6 +45,9 @@ const STATES = {
   CLIENT_WAITING_REDEEM_RENTAL_ID: 'client_waiting_redeem_rental_id',
   ADMIN_CLIENT_ACTIONS: 'admin_client_actions',
   ADMIN_WAITING_CLIENT_IDENTIFIER: 'admin_waiting_client_identifier',
+  ADMIN_WAITING_CREATE_CLIENT_NAME: 'admin_waiting_create_client_name',
+  ADMIN_WAITING_CREATE_CLIENT_PHONE: 'admin_waiting_create_client_phone',
+  ADMIN_WAITING_CREATE_CLIENT_RENTAL_DECISION: 'admin_waiting_create_client_rental_decision',
   ADMIN_WAITING_NEW_CLIENT_NAME: 'admin_waiting_new_client_name',
   ADMIN_WAITING_ACCRUAL_AMOUNT: 'admin_waiting_accrual_amount',
   ADMIN_WAITING_ACCRUAL_DATETIME: 'admin_waiting_accrual_datetime',
@@ -90,6 +93,9 @@ const BUTTONS = {
   MANAGER_TOPIC_RENTAL: '🚘 Тема: аренда',
   MANAGER_TOPIC_BONUSES: '🎁 Тема: бонусы',
   MANAGER_CALLBACK: '📲 Заказать звонок',
+  ADD_CLIENT: '➕ Добавить клиента',
+  CONFIRM_ADD_RENTAL: '✅ Добавить аренду',
+  SKIP_ADD_RENTAL: '⏭ Пропустить аренду',
   BACK: '⬅️ Назад',
   ADMIN_MENU: '🛠 Админ-меню',
   FIND_CLIENT: '🔎 Найти клиента',
@@ -478,6 +484,10 @@ const TEXT = {
   INVALID_NAME: 'Введите корректное имя.',
   INVALID_PHONE: 'Не удалось распознать номер телефона.',
   INVALID_RENTAL_AMOUNT: 'Введите корректную сумму аренды.',
+  CREATE_CLIENT_WAIT_NAME: 'Введите имя клиента.',
+  CREATE_CLIENT_WAIT_PHONE: 'Введите номер телефона клиента.',
+  CREATE_CLIENT_EXISTS: 'Клиент с таким номером уже есть в базе.',
+  CREATE_CLIENT_RENTAL_DECISION: 'Добавить клиенту аренду сейчас?\nЕсли это прошлая аренда, укажите её сумму и дату, и бонусы начислятся сразу.',
   CLIENTS_LIST_EMPTY: 'Клиентов пока нет.',
   MANAGER_MENU: 'Выберите тему обращения или закажите обратный звонок.',
   NO_HISTORY: 'Операций пока нет.',
@@ -684,6 +694,16 @@ function currentDisplayDateTime() {
 function buildClientPublicId(client) {
   const digits = safeString(client.phone).replace(/\D/g, '');
   return digits ? `DC-${digits}` : `DC-${safeString(client.telegram_id) || 'UNKNOWN'}`;
+}
+
+function isPositiveText(value) {
+  const normalized = safeString(value).trim().toLowerCase();
+  return ['да', 'yes', 'y', 'ага'].includes(normalized);
+}
+
+function isNegativeText(value) {
+  const normalized = safeString(value).trim().toLowerCase();
+  return ['нет', 'no', 'n', 'неа'].includes(normalized);
 }
 
 function splitTextByLimit(lines, limit = 3500) {
@@ -1221,8 +1241,8 @@ function adminKeyboard() {
   return {
     keyboard: [
       [{ text: BUTTONS.FIND_CLIENT }, { text: BUTTONS.CLIENT_LIST }],
+      [{ text: BUTTONS.ADD_CLIENT }, { text: BUTTONS.ACCRUE_BONUSES }],
       [{ text: BUTTONS.CLIENT_BALANCE }, { text: BUTTONS.CLIENT_HISTORY }],
-      [{ text: BUTTONS.ACCRUE_BONUSES }],
       [{ text: BUTTONS.MANUAL_ACCRUAL }, { text: BUTTONS.MANUAL_REDEEM }],
     ],
     resize_keyboard: true,
@@ -1236,6 +1256,17 @@ function adminClientActionsKeyboard() {
       [{ text: BUTTONS.MANUAL_REDEEM }, { text: BUTTONS.ADMIN_MENU }],
     ],
     resize_keyboard: true,
+  };
+}
+
+function createClientRentalDecisionKeyboard() {
+  return {
+    keyboard: [
+      [{ text: BUTTONS.CONFIRM_ADD_RENTAL }, { text: BUTTONS.SKIP_ADD_RENTAL }],
+      [{ text: BUTTONS.BACK }],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true,
   };
 }
 
@@ -1307,6 +1338,10 @@ async function findClientOrSendMessage(chatId, identifier) {
 }
 
 async function handleStart(chatId, telegramId) {
+  if (isAdmin(telegramId)) {
+    return sendAdminMenu(chatId, telegramId);
+  }
+
   const client = await getClientByTelegramId(telegramId);
 
   if (client) {
@@ -1681,28 +1716,12 @@ async function handleCommand(context) {
     return handleStart(chatId, telegramId);
   }
 
-  if (text === '/admin') {
-    if (!context.isAdminUser) return sendMessage(chatId, TEXT.ACCESS_DENIED_ADMIN);
-    return sendAdminMenu(chatId, telegramId);
-  }
-
-  const clientCommandMatch = text.match(/^\/client(?:@\w+)?(?:\s+(.+))?$/);
-  if (!clientCommandMatch) return null;
-  if (!context.isAdminUser) return sendMessage(chatId, TEXT.ACCESS_DENIED_ADMIN);
-
-  const identifier = safeString(clientCommandMatch[1]).trim();
-  if (!identifier) {
-    return sendMessage(chatId, 'Использование:\n/client <телефон>');
-  }
-
-  const client = await findClientOrSendMessage(chatId, identifier);
-  if (!client) return true;
-
-  await setAdminClientFocus(telegramId, client.phone);
-  return sendClientSummary(chatId, client.phone, adminClientActionsKeyboard());
+  return null;
 }
 
 async function handleClientMenuAction(context) {
+  if (context.isAdminUser) return null;
+
   const { chatId, telegramId, text } = context;
 
   if (text === BUTTONS.MY_CARD) return handleMyCard(chatId, telegramId);
@@ -1725,6 +1744,10 @@ async function handleClientMenuAction(context) {
 async function handleAdminAction(context) {
   const { chatId, telegramId, text, isAdminUser, focusedClientPhone } = context;
   if (!isAdminUser) return null;
+
+  if (text === BUTTONS.BACK) {
+    return sendAdminMenu(chatId, telegramId);
+  }
 
   if (text === BUTTONS.ADMIN_MENU) {
     return sendAdminMenu(chatId, telegramId);
@@ -1756,6 +1779,11 @@ async function handleAdminAction(context) {
 
   if (text === BUTTONS.CLIENT_LIST) {
     return sendClientsList(chatId);
+  }
+
+  if (text === BUTTONS.ADD_CLIENT) {
+    await setState(telegramId, STATES.ADMIN_WAITING_CREATE_CLIENT_NAME, {});
+    return sendMessage(chatId, TEXT.CREATE_CLIENT_WAIT_NAME);
   }
 
   if (text === BUTTONS.CLIENT_BALANCE) {
@@ -1865,6 +1893,77 @@ async function handleAdminWaitingNewClientNameState(context) {
   }
 
   const client = await upsertClient('', name, phone);
+
+  await setState(context.telegramId, STATES.ADMIN_WAITING_ACCRUAL_AMOUNT, {
+    target_phone: client.phone,
+  });
+
+  return sendMessage(context.chatId, formatClientPromptMessage(client, TEXT.WAIT_RENTAL_AMOUNT));
+}
+
+async function handleAdminWaitingCreateClientNameState(context) {
+  const name = context.text.trim();
+  if (!name || name.length < 2) return sendMessage(context.chatId, TEXT.INVALID_NAME);
+
+  await setState(context.telegramId, STATES.ADMIN_WAITING_CREATE_CLIENT_PHONE, {
+    client_name: name,
+  });
+
+  return sendMessage(context.chatId, TEXT.CREATE_CLIENT_WAIT_PHONE);
+}
+
+async function handleAdminWaitingCreateClientPhoneState(context) {
+  const phone = normalizePhone(context.text);
+  if (!phone) return sendMessage(context.chatId, TEXT.INVALID_PHONE);
+
+  const temp = await parseStateData(context.telegramId);
+  const name = safeString(temp.client_name).trim();
+  if (!name) {
+    await setState(context.telegramId, STATES.ADMIN_WAITING_CREATE_CLIENT_NAME, {});
+    return sendMessage(context.chatId, TEXT.CREATE_CLIENT_WAIT_NAME);
+  }
+
+  const existingClient = await getClientByPhone(phone);
+  const client = await upsertClient('', name, phone);
+  const prefix = existingClient ? TEXT.CREATE_CLIENT_EXISTS : 'Клиент добавлен в базу.';
+
+  await setState(context.telegramId, STATES.ADMIN_WAITING_CREATE_CLIENT_RENTAL_DECISION, {
+    target_phone: client.phone,
+  });
+
+  return sendMessage(
+    context.chatId,
+    `${prefix}\n\n${formatFoundClientMessage(client)}\n\n${TEXT.CREATE_CLIENT_RENTAL_DECISION}`,
+    createClientRentalDecisionKeyboard()
+  );
+}
+
+async function handleAdminWaitingCreateClientRentalDecisionState(context) {
+  const temp = await parseStateData(context.telegramId);
+  const targetPhone = normalizePhone(temp.target_phone);
+  const client = await getClientByPhone(targetPhone);
+
+  if (!client) {
+    await clearState(context.telegramId);
+    return sendMessage(context.chatId, TEXT.CLIENT_NOT_FOUND_RESTART);
+  }
+
+  const text = safeString(context.text).trim();
+  const wantsRental = text === BUTTONS.CONFIRM_ADD_RENTAL || isPositiveText(text);
+  const skipsRental = text === BUTTONS.SKIP_ADD_RENTAL || isNegativeText(text);
+
+  if (!wantsRental && !skipsRental) {
+    return sendMessage(
+      context.chatId,
+      TEXT.CREATE_CLIENT_RENTAL_DECISION,
+      createClientRentalDecisionKeyboard()
+    );
+  }
+
+  if (skipsRental) {
+    await setAdminClientFocus(context.telegramId, client.phone);
+    return sendFoundClientCard(context.chatId, client.phone, adminClientActionsKeyboard());
+  }
 
   await setState(context.telegramId, STATES.ADMIN_WAITING_ACCRUAL_AMOUNT, {
     target_phone: client.phone,
@@ -2126,6 +2225,9 @@ const STATE_HANDLERS = {
   [STATES.ADMIN_WAITING_HISTORY_IDENTIFIER]: handleAdminWaitingHistoryIdentifierState,
   [STATES.ADMIN_WAITING_BALANCE_IDENTIFIER]: handleAdminWaitingBalanceIdentifierState,
   [STATES.ADMIN_WAITING_CLIENT_IDENTIFIER]: handleAdminWaitingClientIdentifierState,
+  [STATES.ADMIN_WAITING_CREATE_CLIENT_NAME]: handleAdminWaitingCreateClientNameState,
+  [STATES.ADMIN_WAITING_CREATE_CLIENT_PHONE]: handleAdminWaitingCreateClientPhoneState,
+  [STATES.ADMIN_WAITING_CREATE_CLIENT_RENTAL_DECISION]: handleAdminWaitingCreateClientRentalDecisionState,
   [STATES.ADMIN_WAITING_NEW_CLIENT_NAME]: handleAdminWaitingNewClientNameState,
   [STATES.ADMIN_WAITING_ACCRUAL_AMOUNT]: handleAdminWaitingAccrualAmountState,
   [STATES.ADMIN_WAITING_ACCRUAL_DATETIME]: handleAdminWaitingAccrualDatetimeState,

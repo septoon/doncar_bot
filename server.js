@@ -10,6 +10,7 @@ const APP_VERSION = 'v1.0.0';
 const {
   BOT_TOKEN,
   ADMIN_TELEGRAM_IDS = '',
+  ADMIN_CHANEL_ID = '',
   GOOGLE_SHEET_ID,
   GOOGLE_SERVICE_ACCOUNT_EMAIL,
   GOOGLE_PRIVATE_KEY,
@@ -26,6 +27,8 @@ if (!GOOGLE_PRIVATE_KEY) throw new Error('GOOGLE_PRIVATE_KEY is required');
 const adminIds = ADMIN_TELEGRAM_IDS.split(',')
   .map(v => v.trim())
   .filter(Boolean);
+
+const adminChannelId = safeString(ADMIN_CHANEL_ID).trim();
 
 const SHEET_CLIENTS = 'clients';
 const SHEET_HISTORY = 'history';
@@ -1264,9 +1267,7 @@ async function notifyManagersAboutClientTopic(client, topic, isCallbackRequest =
     formatClientCard(client),
   ].join('\n');
 
-  for (const adminId of adminIds) {
-    await sendMessage(adminId, text);
-  }
+  return sendMessage(adminChannelId, text);
 }
 
 async function notifyAdminsAboutRequest(requestId) {
@@ -1411,13 +1412,13 @@ async function handleContactManagerMenu(chatId, telegramId) {
   const client = await getClientByTelegramId(telegramId);
   if (!client) return sendMessage(chatId, TEXT.REGISTER_FIRST);
 
-  if (!adminIds.length) {
-    return sendMessage(chatId, 'Менеджеры пока не настроены. Попробуйте позже.', clientKeyboard());
+  if (!adminChannelId) {
+    return sendMessage(chatId, 'Канал уведомлений пока не настроен. Попробуйте позже.', clientKeyboard());
   }
 
   return sendMessage(
     chatId,
-    `Уведомление будет отправлено всем менеджерам.\n\n${TEXT.MANAGER_MENU}`,
+    `Уведомление будет отправлено в канал менеджеров.\n\n${TEXT.MANAGER_MENU}`,
     managerKeyboard()
   );
 }
@@ -1426,15 +1427,15 @@ async function handleManagerTopic(chatId, telegramId, topic, isCallbackRequest =
   const client = await getClientByTelegramId(telegramId);
   if (!client) return sendMessage(chatId, TEXT.REGISTER_FIRST);
 
-  if (!adminIds.length) {
-    return sendMessage(chatId, 'Менеджеры пока не настроены. Попробуйте позже.', clientKeyboard());
+  if (!adminChannelId) {
+    return sendMessage(chatId, 'Канал уведомлений пока не настроен. Попробуйте позже.', clientKeyboard());
   }
 
   await notifyManagersAboutClientTopic(client, topic, isCallbackRequest);
 
   const response = isCallbackRequest
-    ? 'Запрос на обратный звонок отправлен менеджерам.'
-    : `Запрос по теме "${topic}" отправлен менеджерам.`;
+    ? 'Запрос на обратный звонок отправлен в канал менеджеров.'
+    : `Запрос по теме "${topic}" отправлен в канал менеджеров.`;
 
   return sendMessage(
     chatId,

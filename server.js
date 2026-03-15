@@ -1505,6 +1505,21 @@ async function notifyChannelAboutRedeemRequest(request, client) {
   return sendMessage(adminChannelId, text);
 }
 
+async function notifyChannelAboutNewClient(client, welcomeAmount = 0) {
+  if (!adminChannelId || !client) return null;
+
+  const lines = [
+    'Зарегистрирован новый клиент',
+    formatClientCard(client),
+  ];
+
+  if (safeNumber(welcomeAmount) > 0) {
+    lines.push(`Приветственный кешбек: ${formatRubles(welcomeAmount)}`);
+  }
+
+  return sendMessage(adminChannelId, lines.join('\n\n'));
+}
+
 async function notifyAdminsAboutRequest(requestId) {
   const request = await getRequestById(requestId);
   if (!request) return;
@@ -1607,6 +1622,18 @@ async function handleContact(chatId, telegramId, contact, fromUser) {
   }
 
   lines.push(`Ваш баланс: ${formatRubles(client?.bonus_balance)}`);
+
+  if (isNewClient) {
+    try {
+      await notifyChannelAboutNewClient(client, currentHelloRubles);
+    } catch (error) {
+      logError('ERROR', error, {
+        scope: 'new_client_notification',
+        telegramId,
+        phone: client?.phone,
+      });
+    }
+  }
 
   return sendMessage(
     chatId,

@@ -30,13 +30,14 @@ const adminIds = ADMIN_TELEGRAM_IDS.split(',')
   .filter(Boolean);
 
 const adminChannelId = safeString(ADMIN_CHANEL_ID).trim();
-const helloRubles = round2(Math.max(0, safeNumber(HELLO_RUBLES)));
+const defaultHelloRubles = round2(Math.max(0, safeNumber(HELLO_RUBLES)));
 
 const SHEET_CLIENTS = 'clients';
 const SHEET_HISTORY = 'history';
 const SHEET_STATES = 'states';
 const SHEET_REQUESTS = 'requests';
 const SHEET_RENTALS = 'rentals';
+const SHEET_CONFIG = 'config';
 
 const STATES = {
   NONE: '',
@@ -64,6 +65,7 @@ const STATES = {
   ADMIN_WAITING_MANUAL_REDEEM_IDENTIFIER: 'admin_waiting_manual_redeem_identifier',
   ADMIN_WAITING_MANUAL_REDEEM_AMOUNT: 'admin_waiting_manual_redeem_amount',
   ADMIN_WAITING_MANUAL_REDEEM_COMMENT: 'admin_waiting_manual_redeem_comment',
+  ADMIN_WAITING_HELLO_RUBLES_AMOUNT: 'admin_waiting_hello_rubles_amount',
   ADMIN_WAITING_MANUAL_CLIENT_IDENTIFIER: 'admin_waiting_manual_client_identifier',
   ADMIN_WAITING_MANUAL_AMOUNT: 'admin_waiting_manual_amount',
   ADMIN_WAITING_MANUAL_COMMENT: 'admin_waiting_manual_comment',
@@ -84,20 +86,26 @@ const OPERATION_TYPE = {
   MANUAL_REDEEM: 'manual_redeem',
 };
 
+const USER_MODE = {
+  ADMIN: 'admin',
+  CLIENT: 'client',
+};
+
 const BUTTONS = {
   MY_CARD: '💳 Моя карта',
   MY_BALANCE: '💰 Мой баланс',
-  BONUS_HISTORY: '📜 История рублей',
+  BONUS_HISTORY: '📜 История кешбека',
   RENTAL_HISTORY: '🚘 История аренд',
   PROFILE: '👤 Профиль',
   FAQ: '❓ FAQ',
   CLIENT_QR_ID: '🆔 QR/ID',
-  USE_BONUSES: '💸 Использовать рубли',
+  USE_BONUSES: '💸 Использовать кешбек',
   CONTACT_MANAGER: '📞 Связаться с менеджером',
   MANAGER_TOPIC_RENTAL: '🚘 Тема: аренда',
-  MANAGER_TOPIC_BONUSES: '💸 Тема: рубли',
+  MANAGER_TOPIC_BONUSES: '💸 Тема: кешбек',
   MANAGER_CALLBACK: '📲 Заказать звонок',
   ADD_CLIENT: '➕ Добавить клиента',
+  HELLO_BONUS: '🎁 Приветственный бонус',
   CONFIRM_ADD_RENTAL: '✅ Добавить аренду',
   SKIP_ADD_RENTAL: '⏭ Пропустить аренду',
   BACK: '⬅️ Назад',
@@ -106,7 +114,7 @@ const BUTTONS = {
   CLIENT_LIST: '📋 Список клиентов',
   CLIENT_BALANCE: '💰 Баланс клиента',
   CLIENT_HISTORY: '📜 История клиента',
-  ACCRUE_BONUSES: '✨ Начислить рубли',
+  ACCRUE_BONUSES: '✨ Начислить кешбек',
   MANUAL_ACCRUAL: '➕ Начислить вручную',
   MANUAL_REDEEM: '➖ Списать вручную',
   REDEEM_REQUESTS: '📝 Заявки на списание',
@@ -124,6 +132,7 @@ const SHEET_CACHE_TTLS = {
   [SHEET_REQUESTS]: 5_000,
   [SHEET_STATES]: 3_000,
   [SHEET_RENTALS]: 5_000,
+  [SHEET_CONFIG]: 10_000,
 };
 
 const sheetCache = {
@@ -132,6 +141,7 @@ const sheetCache = {
   [SHEET_REQUESTS]: { data: null, expiresAt: 0 },
   [SHEET_STATES]: { data: null, expiresAt: 0 },
   [SHEET_RENTALS]: { data: null, expiresAt: 0 },
+  [SHEET_CONFIG]: { data: null, expiresAt: 0 },
 };
 
 const clientIndexesCache = new WeakMap();
@@ -277,6 +287,14 @@ async function initSheets() {
     'telegram_id',
     'car_brand',
   ]);
+
+  await ensureSheet(SHEET_CONFIG, [
+    'key',
+    'value',
+    'updated_at',
+  ]);
+
+  await ensureConfigValue('hello_rubles', safeString(defaultHelloRubles));
 }
 
 async function readRange(range) {
@@ -500,6 +518,7 @@ const TEXT = {
   INVALID_NAME: 'Введите корректное имя.',
   INVALID_PHONE: 'Не удалось распознать номер телефона.',
   INVALID_RENTAL_AMOUNT: 'Введите корректную сумму аренды.',
+  INVALID_HELLO_RUBLES: 'Введите корректную сумму приветственного кешбека. Можно 0.',
   CREATE_CLIENT_WAIT_NAME: 'Введите имя клиента.',
   CREATE_CLIENT_WAIT_PHONE: 'Введите номер телефона клиента.',
   CREATE_CLIENT_EXISTS: 'Клиент с таким номером уже есть в базе.',
@@ -524,6 +543,7 @@ const TEXT = {
   WAIT_COMMENT: 'Введите комментарий.',
   WAIT_IDENTIFIER: 'Введите номер телефона клиента',
   WAIT_CAR_BRAND: 'Введите марку автомобиля.',
+  WAIT_HELLO_RUBLES: 'Введите сумму приветственного кешбека. Можно указать 0.',
   WAIT_MANUAL_ACCRUAL_AMOUNT: 'Введите сумму рублей.',
   WAIT_MANUAL_REDEEM_AMOUNT: 'Введите сумму списания.',
   WAIT_NEW_CLIENT_NAME: 'Клиент не найден. Введите имя клиента.',
@@ -884,9 +904,37 @@ function mapRentalRow(row, rowNumber) {
   };
 }
 
+function mapConfigRow(row, rowNumber) {
+  return {
+    rowNumber,
+    key: safeString(row[0]).trim(),
+    value: row[1] ?? '',
+    updated_at: row[2] || '',
+  };
+}
+
 function serializeStateValue(tempValue = {}) {
   if (typeof tempValue === 'string') return tempValue;
   return JSON.stringify(tempValue || {});
+}
+
+function getPersistentStateData(tempValue = {}) {
+  const mode = safeString(tempValue?.mode).trim();
+  if (!mode) return {};
+
+  return { mode };
+}
+
+function mergeStateData(existingTempValue = {}, nextTempValue = {}) {
+  return {
+    ...getPersistentStateData(existingTempValue),
+    ...(nextTempValue || {}),
+  };
+}
+
+function getUserMode(isAdminUser, stateData = {}) {
+  if (!isAdminUser) return USER_MODE.CLIENT;
+  return safeString(stateData.mode) === USER_MODE.CLIENT ? USER_MODE.CLIENT : USER_MODE.ADMIN;
 }
 
 // ===== DATA ACCESS =====
@@ -920,6 +968,55 @@ async function getClients() {
   }
 
   return clients;
+}
+
+async function getConfigValue(key, fallback = '') {
+  const lookupKey = safeString(key).trim();
+  if (!lookupKey) return fallback;
+
+  const rows = await getAllRows(SHEET_CONFIG);
+  for (let i = 1; i < rows.length; i++) {
+    const item = mapConfigRow(rows[i], i + 1);
+    if (item.key !== lookupKey) continue;
+    return safeString(item.value, fallback);
+  }
+
+  return fallback;
+}
+
+async function setConfigValue(key, value) {
+  const lookupKey = safeString(key).trim();
+  if (!lookupKey) throw new Error('Config key is required');
+
+  const rows = await getAllRows(SHEET_CONFIG);
+  const now = nowIso();
+
+  for (let i = 1; i < rows.length; i++) {
+    const item = mapConfigRow(rows[i], i + 1);
+    if (item.key !== lookupKey) continue;
+
+    await updateRowCells(SHEET_CONFIG, item.rowNumber, 'A', [
+      lookupKey,
+      safeString(value),
+      now,
+    ]);
+    return;
+  }
+
+  await appendRow(SHEET_CONFIG, [lookupKey, safeString(value), now]);
+}
+
+async function ensureConfigValue(key, defaultValue) {
+  const existingValue = await getConfigValue(key, '');
+  if (safeString(existingValue).trim() !== '') return;
+  await setConfigValue(key, defaultValue);
+}
+
+async function getHelloRubles() {
+  const rawValue = await getConfigValue('hello_rubles', safeString(defaultHelloRubles));
+  const parsedValue = safeNumber(rawValue, NaN);
+  if (!Number.isFinite(parsedValue)) return defaultHelloRubles;
+  return round2(Math.max(0, parsedValue));
 }
 
 async function saveClient(client) {
@@ -1042,16 +1139,17 @@ async function addRentalEntry(entry) {
   ]);
 }
 
-async function applyWelcomeRubles(client) {
-  if (!client || helloRubles <= 0) return client;
+async function applyWelcomeRubles(client, amount) {
+  const welcomeAmount = round2(Math.max(0, safeNumber(amount)));
+  if (!client || welcomeAmount <= 0) return client;
 
-  const nextBalance = await changeBonusBalanceByPhone(client.phone, helloRubles);
+  const nextBalance = await changeBonusBalanceByPhone(client.phone, welcomeAmount);
   await addHistory({
     operation_id: buildOperationId(OPERATION_TYPE.WELCOME_ACCRUAL),
     telegram_id: client.telegram_id,
     type: OPERATION_TYPE.WELCOME_ACCRUAL,
-    amount: helloRubles,
-    comment: 'Приветственные рубли',
+    amount: welcomeAmount,
+    comment: 'Приветственный кешбек',
     admin_id: 'system',
     rental_datetime: currentDisplayDateTime(),
     duplicate_key: '',
@@ -1060,7 +1158,7 @@ async function applyWelcomeRubles(client) {
 
   logEvent('WELCOME_ACCRUAL', {
     telegramId: client.telegram_id,
-    amount: helloRubles,
+    amount: welcomeAmount,
     balance: nextBalance,
   });
 
@@ -1222,16 +1320,18 @@ async function getState(telegramId) {
 async function setState(telegramId, state, tempValue) {
   const rows = await getAllRows(SHEET_STATES);
   const now = nowIso();
-  const serialized = serializeStateValue(tempValue);
 
   for (let i = 1; i < rows.length; i++) {
     if (safeString(rows[i][0]) === safeString(telegramId)) {
+      const existingTempValue = safeJsonParse(rows[i][2], {});
+      const serialized = serializeStateValue(mergeStateData(existingTempValue, tempValue));
       await updateRowCells(SHEET_STATES, i + 1, 'B', [state, serialized, now]);
       logEvent('STATE', { telegramId, state: state || 'none' });
       return;
     }
   }
 
+  const serialized = serializeStateValue(tempValue);
   await appendRow(SHEET_STATES, [telegramId, state, serialized, now]);
   logEvent('STATE', { telegramId, state: state || 'none' });
 }
@@ -1250,11 +1350,33 @@ async function clearState(telegramId) {
   const rows = await getAllRows(SHEET_STATES);
   for (let i = 1; i < rows.length; i++) {
     if (safeString(rows[i][0]) === safeString(telegramId)) {
-      await updateRowCells(SHEET_STATES, i + 1, 'B', [STATES.NONE, '', nowIso()]);
+      const existingTempValue = safeJsonParse(rows[i][2], {});
+      const serialized = serializeStateValue(getPersistentStateData(existingTempValue));
+      await updateRowCells(SHEET_STATES, i + 1, 'B', [STATES.NONE, serialized, nowIso()]);
       logEvent('STATE', { telegramId, state: 'none' });
       return;
     }
   }
+}
+
+async function setAdminInterfaceMode(telegramId, mode) {
+  if (!isAdmin(telegramId)) return;
+
+  const rows = await getAllRows(SHEET_STATES);
+  const now = nowIso();
+  const nextMode = mode === USER_MODE.CLIENT ? USER_MODE.CLIENT : USER_MODE.ADMIN;
+  const serialized = serializeStateValue({ mode: nextMode });
+
+  for (let i = 1; i < rows.length; i++) {
+    if (safeString(rows[i][0]) === safeString(telegramId)) {
+      await updateRowCells(SHEET_STATES, i + 1, 'B', [STATES.NONE, serialized, now]);
+      logEvent('MODE', { telegramId, mode: nextMode });
+      return;
+    }
+  }
+
+  await appendRow(SHEET_STATES, [telegramId, STATES.NONE, serialized, now]);
+  logEvent('MODE', { telegramId, mode: nextMode });
 }
 
 // ===== TELEGRAM =====
@@ -1312,6 +1434,7 @@ function adminKeyboard() {
     keyboard: [
       [{ text: BUTTONS.FIND_CLIENT }, { text: BUTTONS.CLIENT_LIST }],
       [{ text: BUTTONS.ADD_CLIENT }, { text: BUTTONS.ACCRUE_BONUSES }],
+      [{ text: BUTTONS.HELLO_BONUS }],
       [{ text: BUTTONS.CLIENT_BALANCE }, { text: BUTTONS.CLIENT_HISTORY }],
       [{ text: BUTTONS.MANUAL_ACCRUAL }, { text: BUTTONS.MANUAL_REDEEM }],
     ],
@@ -1408,6 +1531,15 @@ async function sendAdminMenu(chatId, telegramId) {
   return sendMessage(chatId, TEXT.ADMIN_MENU, adminKeyboard());
 }
 
+async function sendHelloRublesPrompt(chatId, telegramId) {
+  const currentHelloRubles = await getHelloRubles();
+  await setState(telegramId, STATES.ADMIN_WAITING_HELLO_RUBLES_AMOUNT, {});
+  return sendMessage(
+    chatId,
+    `Текущий приветственный кешбек: ${formatRubles(currentHelloRubles)}\n${TEXT.WAIT_HELLO_RUBLES}`
+  );
+}
+
 async function findClientOrSendMessage(chatId, identifier) {
   const client = await findClientByIdentifier(identifier);
   if (!client) {
@@ -1418,8 +1550,8 @@ async function findClientOrSendMessage(chatId, identifier) {
   return client;
 }
 
-async function handleStart(chatId, telegramId) {
-  if (isAdmin(telegramId)) {
+async function handleStart(chatId, telegramId, actsAsAdmin = isAdmin(telegramId)) {
+  if (actsAsAdmin) {
     return sendAdminMenu(chatId, telegramId);
   }
 
@@ -1457,10 +1589,11 @@ async function handleContact(chatId, telegramId, contact, fromUser) {
   const existingByPhone = await getClientByPhone(phone);
   const existingByTelegram = await getClientByTelegramId(telegramId);
   const isNewClient = !existingByPhone && !existingByTelegram;
+  const currentHelloRubles = await getHelloRubles();
 
   let client = await upsertClient(telegramId, getTelegramDisplayName(fromUser), phone);
-  if (isNewClient && helloRubles > 0) {
-    client = await applyWelcomeRubles(client);
+  if (isNewClient && currentHelloRubles > 0) {
+    client = await applyWelcomeRubles(client, currentHelloRubles);
   }
 
   await clearState(telegramId);
@@ -1469,8 +1602,8 @@ async function handleContact(chatId, telegramId, contact, fromUser) {
     TEXT.REGISTER_COMPLETE,
   ];
 
-  if (isNewClient && helloRubles > 0) {
-    lines.push(`Поздравляем! Вам начислено ${formatRubles(helloRubles)}.`);
+  if (isNewClient && currentHelloRubles > 0) {
+    lines.push(`Поздравляем! Вам начислено ${formatRubles(currentHelloRubles)}.`);
   }
 
   lines.push(`Ваш баланс: ${formatRubles(client?.bonus_balance)}`);
@@ -1752,8 +1885,10 @@ async function buildMessageContext(message) {
   const state = await getState(telegramId);
   const isAdminUser = isAdmin(telegramId);
   const stateData = isAdminUser ? await parseStateData(telegramId) : {};
+  const userMode = getUserMode(isAdminUser, stateData);
+  const actsAsAdmin = isAdminUser && userMode === USER_MODE.ADMIN;
   const focusedClientPhone =
-    isAdminUser && state === STATES.ADMIN_CLIENT_ACTIONS
+    actsAsAdmin && state === STATES.ADMIN_CLIENT_ACTIONS
       ? safeString(stateData.target_phone)
       : '';
 
@@ -1765,6 +1900,8 @@ async function buildMessageContext(message) {
     state,
     stateData,
     isAdminUser,
+    userMode,
+    actsAsAdmin,
     focusedClientPhone,
   };
 }
@@ -1819,14 +1956,26 @@ async function handleCommand(context) {
   const { chatId, telegramId, text } = context;
 
   if (text === '/start') {
-    return handleStart(chatId, telegramId);
+    return handleStart(chatId, telegramId, context.actsAsAdmin);
+  }
+
+  if (text === '/admin') {
+    if (!context.isAdminUser) return sendMessage(chatId, TEXT.ACCESS_DENIED_ADMIN);
+    await setAdminInterfaceMode(telegramId, USER_MODE.ADMIN);
+    return handleStart(chatId, telegramId, true);
+  }
+
+  if (text === '/client') {
+    if (!context.isAdminUser) return sendMessage(chatId, TEXT.ACCESS_DENIED_ADMIN);
+    await setAdminInterfaceMode(telegramId, USER_MODE.CLIENT);
+    return handleStart(chatId, telegramId, false);
   }
 
   return null;
 }
 
 async function handleClientMenuAction(context) {
-  if (context.isAdminUser) return null;
+  if (context.actsAsAdmin) return null;
 
   const { chatId, telegramId, text } = context;
 
@@ -1840,7 +1989,7 @@ async function handleClientMenuAction(context) {
   if (text === BUTTONS.USE_BONUSES) return handleUseBonuses(chatId, telegramId);
   if (text === BUTTONS.CONTACT_MANAGER) return handleContactManagerMenu(chatId, telegramId);
   if (text === BUTTONS.MANAGER_TOPIC_RENTAL) return handleManagerTopic(chatId, telegramId, 'Аренда');
-  if (text === BUTTONS.MANAGER_TOPIC_BONUSES) return handleManagerTopic(chatId, telegramId, 'Бонусы');
+  if (text === BUTTONS.MANAGER_TOPIC_BONUSES) return handleManagerTopic(chatId, telegramId, 'Кешбек');
   if (text === BUTTONS.MANAGER_CALLBACK) return handleManagerTopic(chatId, telegramId, 'Обратный звонок', true);
   if (text === BUTTONS.BACK) return sendMessage(chatId, 'Главное меню', clientKeyboard());
 
@@ -1848,8 +1997,8 @@ async function handleClientMenuAction(context) {
 }
 
 async function handleAdminAction(context) {
-  const { chatId, telegramId, text, isAdminUser, focusedClientPhone } = context;
-  if (!isAdminUser) return null;
+  const { chatId, telegramId, text, actsAsAdmin, focusedClientPhone } = context;
+  if (!actsAsAdmin) return null;
 
   if (text === BUTTONS.BACK) {
     return sendAdminMenu(chatId, telegramId);
@@ -1890,6 +2039,10 @@ async function handleAdminAction(context) {
   if (text === BUTTONS.ADD_CLIENT) {
     await setState(telegramId, STATES.ADMIN_WAITING_CREATE_CLIENT_NAME, {});
     return sendMessage(chatId, TEXT.CREATE_CLIENT_WAIT_NAME);
+  }
+
+  if (text === BUTTONS.HELLO_BONUS) {
+    return sendHelloRublesPrompt(chatId, telegramId);
   }
 
   if (text === BUTTONS.CLIENT_BALANCE) {
@@ -2113,6 +2266,22 @@ async function handleAdminWaitingCreateClientRentalDecisionState(context) {
   });
 
   return sendMessage(context.chatId, formatClientPromptMessage(client, TEXT.WAIT_RENTAL_AMOUNT));
+}
+
+async function handleAdminWaitingHelloRublesAmountState(context) {
+  const amount = parseMoney(context.text);
+  if (amount === null || amount < 0) {
+    return sendMessage(context.chatId, TEXT.INVALID_HELLO_RUBLES);
+  }
+
+  await setConfigValue('hello_rubles', safeString(round2(amount)));
+  await clearState(context.telegramId);
+
+  return sendMessage(
+    context.chatId,
+    `Приветственный кешбек обновлён: ${formatRubles(amount)}`,
+    adminKeyboard()
+  );
 }
 
 async function handleAdminWaitingManualAccrualIdentifierState(context) {
@@ -2379,6 +2548,7 @@ const STATE_HANDLERS = {
   [STATES.ADMIN_WAITING_CREATE_CLIENT_NAME]: handleAdminWaitingCreateClientNameState,
   [STATES.ADMIN_WAITING_CREATE_CLIENT_PHONE]: handleAdminWaitingCreateClientPhoneState,
   [STATES.ADMIN_WAITING_CREATE_CLIENT_RENTAL_DECISION]: handleAdminWaitingCreateClientRentalDecisionState,
+  [STATES.ADMIN_WAITING_HELLO_RUBLES_AMOUNT]: handleAdminWaitingHelloRublesAmountState,
   [STATES.ADMIN_WAITING_NEW_CLIENT_NAME]: handleAdminWaitingNewClientNameState,
   [STATES.ADMIN_WAITING_ACCRUAL_AMOUNT]: handleAdminWaitingAccrualAmountState,
   [STATES.ADMIN_WAITING_ACCRUAL_CAR_BRAND]: handleAdminWaitingAccrualCarBrandState,
@@ -2398,7 +2568,7 @@ const STATE_HANDLERS = {
 async function handleStateFlow(context) {
   const handler = STATE_HANDLERS[context.state];
   if (!handler) return null;
-  if (safeString(context.state).startsWith('admin_') && !context.isAdminUser) return null;
+  if (safeString(context.state).startsWith('admin_') && !context.actsAsAdmin) return null;
   return handler(context);
 }
 
@@ -2426,7 +2596,7 @@ async function handleMessageUpdate(message) {
     if (result) return result;
   }
 
-  if (context.isAdminUser) {
+  if (context.actsAsAdmin) {
     return sendMessage(
       context.chatId,
       TEXT.ACTION_PROMPT,

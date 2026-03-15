@@ -608,7 +608,7 @@ function formatClientHistory(history) {
 
 function formatRequestCard(request, client) {
   const lines = [
-    `request_id: ${request.request_id}`,
+    `Номер аренды: ${request.request_id}`,
     `Имя клиента: ${client?.name || '-'}`,
     `Телефон: ${formatPhoneDisplay(request.phone || client?.phone)}`,
     `Telegram ID: ${request.telegram_id}`,
@@ -694,18 +694,20 @@ function formatNoRedeemAvailableMessage(client) {
 function formatRequestCreatedMessage(requestId, requestedBonus) {
   return (
     `Заявка создана.\n` +
-    `request_id: ${requestId}\n` +
+    `Номер аренды: ${requestId}\n` +
     `К списанию запрошено: ${formatRubles(requestedBonus)}\n` +
     `Запрос отправлен менеджеру.`
   );
 }
 
 function formatRequestRejectedMessage(requestId) {
-  return `Заявка ${requestId} отклонена.`;
+  return `Заявка по аренде ${requestId} отклонена.`;
 }
 
 function buildRequestId(telegramId) {
-  return `REQ-${telegramId}-${Date.now()}`;
+  const timestampPart = Date.now().toString(36).slice(-6).toUpperCase();
+  const randomPart = Math.random().toString(36).slice(2, 4).toUpperCase().padEnd(2, '0');
+  return `AR-${timestampPart}${randomPart}`;
 }
 
 function buildRentalEntryId() {
